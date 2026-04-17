@@ -25,11 +25,15 @@ mongo_url = os.environ.get('MONGO_URL')
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ.get('DB_NAME', 'gcse_question_bank')]
 
-# Object Storage
+# Object Storage (Emergent - only for file storage, NOT for AI)
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
-EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
+EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")  # Used ONLY for object storage
 APP_NAME = "gcse-question-bank"
 storage_key = None
+
+# Gemini API Key (used for ALL AI extraction)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 # Configure logging
 logging.basicConfig(
@@ -249,14 +253,28 @@ class ExtractionJob(BaseModel):
     error_message: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    api_calls: int = 0  # Track number of AI calls
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+# ============ Cost Tracking ============
+async def log_api_call(paper_id: str, call_type: str, model: str = GEMINI_MODEL):
+    """Log every AI API call for cost monitoring"""
+    doc = {
+        "id": str(uuid.uuid4()),
+        "paper_id": paper_id,
+        "call_type": call_type,  # "question_extraction", "diagram_detection", "crop_refinement", "mark_scheme"
+        "model": model,
+        "provider": "gemini",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    await db.api_call_logs.insert_one(doc)
 
 # ============ AI Extraction Functions ============
 async def extract_questions_from_page(page_image_base64: str, page_number: int, paper_id: str) -> Dict[str, Any]:
     """Use GPT-5.2 to extract questions from a page image"""
     try:
         chat = LlmChat(
-            api_key=EMERGENT_KEY,
+            api_key=GEMINI_API_KEY,
             session_id=f"extraction-{paper_id}-page-{page_number}",
             system_message="""You are an expert at extracting GCSE Maths exam questions from images.
             
@@ -306,7 +324,7 @@ If this is a blank page or cover page with no questions, return:
 {"questions": [], "page_has_content": false, "confidence": 1.0}
 
 Be precise and extract ALL text exactly as written. Convert ALL mathematical expressions to LaTeX."""
-        ).with_model("openai", "gpt-5.2")
+        ).with_model("gemini", GEMINI_MODEL)
         
         image_content = ImageContent(image_base64=page_image_base64)
         user_message = UserMessage(
@@ -315,6 +333,7 @@ Be precise and extract ALL text exactly as written. Convert ALL mathematical exp
         )
         
         response = await chat.send_message(user_message)
+        await log_api_call(paper_id, "question_extraction")
         
         # Parse JSON from response
         import json
@@ -338,7 +357,7 @@ async def extract_mark_scheme_from_page(page_image_base64: str, page_number: int
     """Use GPT-5.2 to extract mark scheme entries from a page image"""
     try:
         chat = LlmChat(
-            api_key=EMERGENT_KEY,
+            api_key=GEMINI_API_KEY,
             session_id=f"markscheme-{mark_scheme_id}-page-{page_number}",
             system_message="""You are an expert at extracting GCSE Maths mark schemes from images.
 
@@ -374,7 +393,7 @@ Return a JSON object with this structure:
 
 If this is a blank page or no mark scheme content, return:
 {"entries": [], "page_has_content": false, "confidence": 1.0}"""
-        ).with_model("openai", "gpt-5.2")
+        ).with_model("gemini", GEMINI_MODEL)
         
         image_content = ImageContent(image_base64=page_image_base64)
         user_message = UserMessage(
@@ -383,6 +402,7 @@ If this is a blank page or no mark scheme content, return:
         )
         
         response = await chat.send_message(user_message)
+        await log_api_call(mark_scheme_id, "mark_scheme_extraction")
         
         import json
         response_text = response.strip()
@@ -404,7 +424,7 @@ async def extract_diagram_from_page(page_image_base64: str, page_number: int, pa
     """Use GPT-5.2 to identify and describe diagram boundaries for cropping"""
     try:
         chat = LlmChat(
-            api_key=EMERGENT_KEY,
+            api_key=GEMINI_API_KEY,
             session_id=f"diagram-{paper_id}-page-{page_number}-q{question_number}",
             system_message="""You are an expert at identifying PRECISE diagram boundaries in GCSE Maths exam papers for clean cropping.
 
@@ -441,7 +461,7 @@ Return a JSON object with this structure:
 }
 
 If there are no diagrams, return: {"diagrams": [], "has_diagrams": false}"""
-        ).with_model("openai", "gpt-5.2")
+        ).with_model("gemini", GEMINI_MODEL)
         
         image_content = ImageContent(image_base64=page_image_base64)
         user_message = UserMessage(
@@ -450,6 +470,7 @@ If there are no diagrams, return: {"diagrams": [], "has_diagrams": false}"""
         )
         
         response = await chat.send_message(user_message)
+        await log_api_call(paper_id, "diagram_detection")
         
         import json
         response_text = response.strip()
@@ -509,7 +530,7 @@ async def refine_crop_with_ai(cropped_base64: str, paper_id: str, question_numbe
     """Send a cropped image back to AI to check if it needs tighter cropping"""
     try:
         chat = LlmChat(
-            api_key=EMERGENT_KEY,
+            api_key=GEMINI_API_KEY,
             session_id=f"refine-{paper_id}-q{question_number}-{uuid.uuid4().hex[:6]}",
             system_message="""You are checking a cropped diagram from a GCSE Maths exam paper.
 
@@ -533,7 +554,7 @@ If there is unwanted text bleeding into the crop, return a tighter bounding box 
 
 Internal labels like "5 m", "12 m", axis numbers, axis titles are PART of the diagram - do NOT remove those.
 Only remove actual question text paragraphs that surround the diagram."""
-        ).with_model("openai", "gpt-5.2")
+        ).with_model("gemini", GEMINI_MODEL)
         
         image_content = ImageContent(image_base64=cropped_base64)
         user_message = UserMessage(
@@ -542,6 +563,7 @@ Only remove actual question text paragraphs that surround the diagram."""
         )
         
         response = await chat.send_message(user_message)
+        await log_api_call(paper_id, "crop_refinement")
         
         import json
         response_text = response.strip()
@@ -608,7 +630,47 @@ async def get_paper(paper_id: str):
         raise HTTPException(status_code=404, detail="Paper not found")
     return paper
 
-# PDF Upload and Extraction
+# ============ Cost Monitoring Endpoint ============
+@api_router.get("/api-usage")
+async def get_api_usage(paper_id: Optional[str] = None):
+    """Get API call usage stats for cost monitoring"""
+    query = {}
+    if paper_id:
+        query["paper_id"] = paper_id
+    
+    total_calls = await db.api_call_logs.count_documents(query)
+    
+    # Breakdown by type
+    pipeline = [
+        {"$match": query},
+        {"$group": {"_id": "$call_type", "count": {"$sum": 1}}}
+    ]
+    breakdown = {}
+    async for doc in db.api_call_logs.aggregate(pipeline):
+        breakdown[doc["_id"]] = doc["count"]
+    
+    # Gemini Flash pricing: ~$0.075/1M input tokens, ~$0.30/1M output tokens
+    # Rough estimate: ~1500 tokens per vision call = ~$0.0002 per call
+    est_cost_per_call = 0.0002
+    estimated_cost = total_calls * est_cost_per_call
+    
+    # Per paper breakdown
+    paper_pipeline = [
+        {"$match": query},
+        {"$group": {"_id": "$paper_id", "calls": {"$sum": 1}}}
+    ]
+    per_paper = {}
+    async for doc in db.api_call_logs.aggregate(paper_pipeline):
+        per_paper[doc["_id"]] = {"calls": doc["calls"], "est_cost": round(doc["calls"] * est_cost_per_call, 4)}
+    
+    return {
+        "total_api_calls": total_calls,
+        "breakdown_by_type": breakdown,
+        "estimated_total_cost_usd": round(estimated_cost, 4),
+        "model": GEMINI_MODEL,
+        "provider": "gemini",
+        "per_paper": per_paper
+    }
 @api_router.post("/papers/{paper_id}/upload")
 async def upload_pdf(paper_id: str, file: UploadFile = File(...)):
     """Upload a PDF and start extraction"""
