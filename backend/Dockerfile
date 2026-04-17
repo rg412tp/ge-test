@@ -7,10 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements.production.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+# Create upload directories
+RUN mkdir -p uploads/pdfs uploads/images uploads/mark-schemes
 
 EXPOSE 8001
 

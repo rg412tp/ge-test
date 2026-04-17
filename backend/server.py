@@ -1,4 +1,5 @@
 from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Response
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -13,27 +14,40 @@ import base64
 import io
 import fitz  # PyMuPDF
 from PIL import Image
-import requests
 import asyncio
-from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+import json as json_lib
+from google import genai
+from google.genai import types
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+# Also load production env if exists
+prod_env = ROOT_DIR / '.env.production'
+if prod_env.exists():
+    load_dotenv(prod_env, override=True)
 
 # MongoDB connection
 mongo_url = os.environ.get('MONGO_URL')
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ.get('DB_NAME', 'gcse_question_bank')]
-
-# Object Storage (Emergent - only for file storage, NOT for AI)
-STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
-EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")  # Used ONLY for object storage
-APP_NAME = "gcse-question-bank"
-storage_key = None
+db = client[os.environ.get('DB_NAME', 'ge_question_bank')]
 
 # Gemini API Key (used for ALL AI extraction)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = "gemini-2.0-flash"
+
+# Local file storage
+UPLOAD_DIR = ROOT_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
+(UPLOAD_DIR / "pdfs").mkdir(exist_ok=True)
+(UPLOAD_DIR / "images").mkdir(exist_ok=True)
+(UPLOAD_DIR / "mark-schemes").mkdir(exist_ok=True)
+
+# Object Storage (Emergent - only used in dev environment, optional)
+STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
+APP_NAME = "gcse-question-bank"
+storage_key = None
+USE_LOCAL_STORAGE = not EMERGENT_KEY or EMERGENT_KEY.strip() == ""
 
 # Configure logging
 logging.basicConfig(
@@ -48,27 +62,41 @@ app = FastAPI(title="GCSE Question Bank API")
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-# ============ Object Storage Functions ============
+# ============ File Storage Functions ============
 def init_storage():
-    """Initialize object storage - call once at startup"""
+    """Initialize object storage - only for Emergent dev environment"""
     global storage_key
+    if USE_LOCAL_STORAGE:
+        logger.info("Using local file storage")
+        return None
     if storage_key:
         return storage_key
     try:
+        import requests
         resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
         resp.raise_for_status()
         storage_key = resp.json()["storage_key"]
-        logger.info("Object storage initialized successfully")
+        logger.info("Emergent object storage initialized")
         return storage_key
     except Exception as e:
-        logger.error(f"Failed to initialize storage: {e}")
+        logger.warning(f"Emergent storage not available, using local: {e}")
         return None
 
 def put_object(path: str, data: bytes, content_type: str) -> dict:
-    """Upload file to object storage"""
+    """Upload file - local or cloud"""
+    if USE_LOCAL_STORAGE:
+        local_path = UPLOAD_DIR / path
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(data)
+        return {"path": str(local_path)}
+    import requests
     key = init_storage()
     if not key:
-        raise Exception("Storage not initialized")
+        # Fallback to local
+        local_path = UPLOAD_DIR / path
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(data)
+        return {"path": str(local_path)}
     resp = requests.put(
         f"{STORAGE_URL}/objects/{path}",
         headers={"X-Storage-Key": key, "Content-Type": content_type},
@@ -78,16 +106,24 @@ def put_object(path: str, data: bytes, content_type: str) -> dict:
     return resp.json()
 
 def get_object(path: str) -> tuple:
-    """Download file from object storage"""
-    key = init_storage()
-    if not key:
-        raise Exception("Storage not initialized")
-    resp = requests.get(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key}, timeout=60
-    )
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+    """Download file - local or cloud"""
+    # Try local first
+    local_path = UPLOAD_DIR / path
+    if local_path.exists():
+        content_type = "image/png" if path.endswith(".png") else "application/pdf"
+        return local_path.read_bytes(), content_type
+    # Try cloud
+    if not USE_LOCAL_STORAGE:
+        import requests
+        key = init_storage()
+        if key:
+            resp = requests.get(
+                f"{STORAGE_URL}/objects/{path}",
+                headers={"X-Storage-Key": key}, timeout=60
+            )
+            resp.raise_for_status()
+            return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+    raise FileNotFoundError(f"File not found: {path}")
 
 # ============ Pydantic Models ============
 class PaperCreate(BaseModel):
@@ -269,14 +305,45 @@ async def log_api_call(paper_id: str, call_type: str, model: str = GEMINI_MODEL)
     }
     await db.api_call_logs.insert_one(doc)
 
-# ============ AI Extraction Functions ============
+# ============ AI Extraction Functions (Google Gemini) ============
+def _init_gemini_client():
+    """Initialize Google Gemini client"""
+    return genai.Client(api_key=GEMINI_API_KEY)
+
+def _parse_json_response(response_text: str) -> dict:
+    """Parse JSON from AI response, handling code blocks"""
+    text = response_text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    return json_lib.loads(text.strip())
+
+async def _call_gemini_vision(system_prompt: str, user_prompt: str, image_base64: str) -> str:
+    """Call Gemini with an image and return text response"""
+    client = _init_gemini_client()
+    image_bytes = base64.b64decode(image_base64)
+    
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(text=system_prompt + "\n\n" + user_prompt),
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                ],
+            )
+        ],
+    )
+    return response.text
+
 async def extract_questions_from_page(page_image_base64: str, page_number: int, paper_id: str) -> Dict[str, Any]:
-    """Use GPT-5.2 to extract questions from a page image"""
+    """Use Gemini to extract questions from a page image"""
     try:
-        chat = LlmChat(
-            api_key=GEMINI_API_KEY,
-            session_id=f"extraction-{paper_id}-page-{page_number}",
-            system_message="""You are an expert at extracting GCSE Maths exam questions from images.
+        system_prompt = """You are an expert at extracting GCSE Maths exam questions from images.
             
 Your task is to:
 1. Identify all questions on the page
@@ -293,12 +360,12 @@ Return a JSON object with this structure:
     {
       "question_number": 1,
       "text": "Full question text here with math in words",
-      "latex": "Full question with \\\\( math \\\\) in LaTeX format",
+      "latex": "Full question with \\( math \\) in LaTeX format",
       "parts": [
         {
           "part_label": "a",
           "text": "Part (a) text here",
-          "latex": "Part (a) with \\\\( x^2 + 2x \\\\) LaTeX",
+          "latex": "Part (a) with \\( x^2 + 2x \\) LaTeX",
           "marks": 2
         }
       ],
@@ -315,177 +382,75 @@ Return a JSON object with this structure:
   "confidence": 0.95
 }
 
-Difficulty levels:
-- bronze: Foundation tier, basic skills
-- silver: Standard GCSE level
-- gold: Higher tier, complex problems
+Difficulty levels: bronze (Foundation), silver (Standard GCSE), gold (Higher complex).
+If blank/cover page: {"questions": [], "page_has_content": false, "confidence": 1.0}
+Be precise. Extract ALL text exactly. Convert ALL math to LaTeX."""
 
-If this is a blank page or cover page with no questions, return:
-{"questions": [], "page_has_content": false, "confidence": 1.0}
-
-Be precise and extract ALL text exactly as written. Convert ALL mathematical expressions to LaTeX."""
-        ).with_model("gemini", GEMINI_MODEL)
+        user_prompt = f"Extract all GCSE Maths questions from page {page_number}. Convert math to LaTeX. Return valid JSON only."
         
-        image_content = ImageContent(image_base64=page_image_base64)
-        user_message = UserMessage(
-            text=f"Extract all GCSE Maths questions from page {page_number} of this exam paper. Convert all mathematical expressions to LaTeX. Return the result as valid JSON.",
-            file_contents=[image_content]
-        )
-        
-        response = await chat.send_message(user_message)
+        response_text = await _call_gemini_vision(system_prompt, user_prompt, page_image_base64)
         await log_api_call(paper_id, "question_extraction")
-        
-        # Parse JSON from response
-        import json
-        # Try to extract JSON from response
-        response_text = response.strip()
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        
-        result = json.loads(response_text.strip())
-        return result
+        return _parse_json_response(response_text)
         
     except Exception as e:
         logger.error(f"Error extracting questions from page {page_number}: {e}")
         return {"questions": [], "page_has_content": False, "confidence": 0.0, "error": str(e)}
 
 async def extract_mark_scheme_from_page(page_image_base64: str, page_number: int, mark_scheme_id: str) -> Dict[str, Any]:
-    """Use GPT-5.2 to extract mark scheme entries from a page image"""
+    """Use Gemini to extract mark scheme entries from a page image"""
     try:
-        chat = LlmChat(
-            api_key=GEMINI_API_KEY,
-            session_id=f"markscheme-{mark_scheme_id}-page-{page_number}",
-            system_message="""You are an expert at extracting GCSE Maths mark schemes from images.
+        system_prompt = """You are an expert at extracting GCSE Maths mark schemes from images.
+Extract: question numbers, parts, marking criteria, M/A/B marks, alternatives, follow-through notes.
 
-Your task is to:
-1. Identify all mark scheme entries on the page
-2. Extract question numbers and parts
-3. Extract the marking criteria and acceptable answers
-4. Identify mark allocations (M for method, A for accuracy, B for standard marks)
-5. Note any alternative acceptable answers
-6. Extract follow-through rules and reasoning notes
-7. Convert mathematical expressions to LaTeX
-
-Return a JSON object with this structure:
+Return JSON:
 {
   "entries": [
     {
-      "question_number": 1,
-      "part_label": "a",
-      "marks": 2,
-      "method_marks": 1,
-      "accuracy_marks": 1,
-      "b_marks": 0,
+      "question_number": 1, "part_label": "a", "marks": 2,
+      "method_marks": 1, "accuracy_marks": 1, "b_marks": 0,
       "text": "Factorisation of x² + 5x + 6 = (x+2)(x+3)",
-      "latex": "Factorisation of \\\\( x^2 + 5x + 6 = (x+2)(x+3) \\\\)",
+      "latex": "\\( x^2 + 5x + 6 = (x+2)(x+3) \\)",
       "acceptable_alternatives": ["(x+3)(x+2)"],
-      "follow_through_notes": "FT from part (a) if attempted",
-      "reasoning_notes": "Award M1 for attempt at factorisation"
+      "follow_through_notes": "FT from part (a)",
+      "reasoning_notes": "Award M1 for attempt"
     }
   ],
-  "page_has_content": true,
-  "confidence": 0.95
+  "page_has_content": true, "confidence": 0.95
 }
+If blank: {"entries": [], "page_has_content": false, "confidence": 1.0}"""
 
-If this is a blank page or no mark scheme content, return:
-{"entries": [], "page_has_content": false, "confidence": 1.0}"""
-        ).with_model("gemini", GEMINI_MODEL)
+        user_prompt = f"Extract all mark scheme entries from page {page_number}. Return valid JSON only."
         
-        image_content = ImageContent(image_base64=page_image_base64)
-        user_message = UserMessage(
-            text=f"Extract all mark scheme entries from page {page_number}. Convert mathematical expressions to LaTeX. Return valid JSON.",
-            file_contents=[image_content]
-        )
-        
-        response = await chat.send_message(user_message)
+        response_text = await _call_gemini_vision(system_prompt, user_prompt, page_image_base64)
         await log_api_call(mark_scheme_id, "mark_scheme_extraction")
-        
-        import json
-        response_text = response.strip()
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        
-        result = json.loads(response_text.strip())
-        return result
+        return _parse_json_response(response_text)
         
     except Exception as e:
         logger.error(f"Error extracting mark scheme from page {page_number}: {e}")
         return {"entries": [], "page_has_content": False, "confidence": 0.0, "error": str(e)}
 
 async def extract_diagram_from_page(page_image_base64: str, page_number: int, paper_id: str, question_number: int) -> Dict[str, Any]:
-    """Use GPT-5.2 to identify and describe diagram boundaries for cropping"""
+    """Use Gemini to identify diagram boundaries for cropping"""
     try:
-        chat = LlmChat(
-            api_key=GEMINI_API_KEY,
-            session_id=f"diagram-{paper_id}-page-{page_number}-q{question_number}",
-            system_message="""You are an expert at identifying PRECISE diagram boundaries in GCSE Maths exam papers for clean cropping.
+        system_prompt = """Identify PRECISE diagram boundaries for clean cropping. 
+ONLY include the visual element (axes, grid, shapes, labels ON diagram). 
+Do NOT include surrounding question text.
+Coordinates as percentages (0-100). Err SMALLER not larger.
 
-CRITICAL RULES FOR BOUNDING BOXES:
-1. The bounding box must ONLY contain the visual diagram/graph/figure itself
-2. Do NOT include any question text, labels outside the diagram frame, or surrounding paragraphs
-3. For graphs: include the axes, grid, plotted points, and axis labels (numbers on axes, axis titles like "Number of hours"). Do NOT include question text above or below the graph
-4. For geometric shapes: include only the shape and its internal labels (side lengths, angles). Do NOT include question text
-5. For tables: include only the table grid and its contents. Do NOT include surrounding text
-6. The top edge should start at the TOP of the graph frame/border, NOT at surrounding text
-7. The bottom edge should end at the BOTTOM axis label or x-axis title, NOT at question text below
-8. The left edge should start at the y-axis or just before the y-axis labels
-9. The right edge should end at the right border of the graph/diagram
+Return JSON:
+{"diagrams": [{"question_number": 1, "type": "graph", "description": "...", 
+  "bounding_box": {"x_percent": 15, "y_percent": 25, "width_percent": 65, "height_percent": 45}}],
+ "has_diagrams": true}
+If none: {"diagrams": [], "has_diagrams": false}"""
 
-The coordinates should be in percentages of the page dimensions (0-100).
-Be VERY precise - err on the side of making the box SMALLER rather than LARGER. It's better to slightly clip a graph edge than to include question text.
-
-Return a JSON object with this structure:
-{
-  "diagrams": [
-    {
-      "question_number": 1,
-      "type": "graph",
-      "description": "Coordinate grid with plotted points",
-      "bounding_box": {
-        "x_percent": 15,
-        "y_percent": 25,
-        "width_percent": 65,
-        "height_percent": 45
-      }
-    }
-  ],
-  "has_diagrams": true
-}
-
-If there are no diagrams, return: {"diagrams": [], "has_diagrams": false}"""
-        ).with_model("gemini", GEMINI_MODEL)
+        user_prompt = f"Identify TIGHT bounding boxes of diagrams on this page for question {question_number}. No question text in crop. Return valid JSON only."
         
-        image_content = ImageContent(image_base64=page_image_base64)
-        user_message = UserMessage(
-            text=f"Identify the TIGHT bounding boxes of diagrams/graphs/figures on this page for question {question_number}. The crop must NOT include any question text - only the visual element itself (axes, grid, shapes, labels ON the diagram). Return valid JSON.",
-            file_contents=[image_content]
-        )
-        
-        response = await chat.send_message(user_message)
+        response_text = await _call_gemini_vision(system_prompt, user_prompt, page_image_base64)
         await log_api_call(paper_id, "diagram_detection")
-        
-        import json
-        response_text = response.strip()
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        
-        result = json.loads(response_text.strip())
-        return result
+        return _parse_json_response(response_text)
         
     except Exception as e:
-        logger.error(f"Error extracting diagram info from page {page_number}: {e}")
+        logger.error(f"Error extracting diagram from page {page_number}: {e}")
         return {"diagrams": [], "has_diagrams": False, "error": str(e)}
 
 # ============ PDF Processing Functions ============
@@ -529,52 +494,17 @@ def crop_image_from_page(pdf_document, page_number: int, bbox: Dict[str, float],
 async def refine_crop_with_ai(cropped_base64: str, paper_id: str, question_number: int) -> Dict[str, Any]:
     """Send a cropped image back to AI to check if it needs tighter cropping"""
     try:
-        chat = LlmChat(
-            api_key=GEMINI_API_KEY,
-            session_id=f"refine-{paper_id}-q{question_number}-{uuid.uuid4().hex[:6]}",
-            system_message="""You are checking a cropped diagram from a GCSE Maths exam paper.
+        system_prompt = """Check if this cropped diagram has unwanted question text.
+If clean: {"needs_recrop": false}
+If text bleeds in, return tighter bounds as % of this image:
+{"needs_recrop": true, "tighter_box": {"x_percent": 5, "y_percent": 10, "width_percent": 90, "height_percent": 80}, "text_found": "description"}
+Keep diagram labels (5m, axis numbers) - only remove question text paragraphs."""
 
-Look at this cropped image and determine if it contains any question text that should NOT be in the crop.
-The crop should ONLY contain the visual diagram/graph/shape and its internal labels (measurements, axis values).
-
-If the crop is clean (no unwanted text), return:
-{"needs_recrop": false}
-
-If there is unwanted text bleeding into the crop, return a tighter bounding box as percentages of THIS cropped image:
-{
-  "needs_recrop": true,
-  "tighter_box": {
-    "x_percent": 5,
-    "y_percent": 10,
-    "width_percent": 90,
-    "height_percent": 80
-  },
-  "text_found": "description of unwanted text"
-}
-
-Internal labels like "5 m", "12 m", axis numbers, axis titles are PART of the diagram - do NOT remove those.
-Only remove actual question text paragraphs that surround the diagram."""
-        ).with_model("gemini", GEMINI_MODEL)
+        user_prompt = "Check this crop for text bleeding. Return JSON only."
         
-        image_content = ImageContent(image_base64=cropped_base64)
-        user_message = UserMessage(
-            text="Check if this cropped diagram has any question text bleeding in. If clean, return {\"needs_recrop\": false}. If text is bleeding, provide tighter bounds as JSON.",
-            file_contents=[image_content]
-        )
-        
-        response = await chat.send_message(user_message)
+        response_text = await _call_gemini_vision(system_prompt, user_prompt, cropped_base64)
         await log_api_call(paper_id, "crop_refinement")
-        
-        import json
-        response_text = response.strip()
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        
-        return json.loads(response_text.strip())
+        return _parse_json_response(response_text)
     except Exception as e:
         logger.error(f"Error in crop refinement: {e}")
         return {"needs_recrop": False}
