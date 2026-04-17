@@ -33,7 +33,7 @@ db = client[os.environ.get('DB_NAME', 'ge_question_bank')]
 
 # Gemini API Key (used for ALL AI extraction)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-2.5-pro"
 
 # Local file storage
 UPLOAD_DIR = ROOT_DIR / "uploads"
@@ -448,7 +448,7 @@ If none: {"diagrams": [], "has_diagrams": false}"""
         return {"diagrams": [], "has_diagrams": False, "error": str(e)}
 
 # ============ PDF Processing Functions ============
-def convert_page_to_base64(pdf_document, page_number: int, dpi: int = 150) -> str:
+def convert_page_to_base64(pdf_document, page_number: int, dpi: int = 200) -> str:
     """Convert a PDF page to base64 encoded PNG image"""
     page = pdf_document[page_number]
     mat = fitz.Matrix(dpi/72, dpi/72)
@@ -456,29 +456,22 @@ def convert_page_to_base64(pdf_document, page_number: int, dpi: int = 150) -> st
     img_data = pix.tobytes("png")
     return base64.b64encode(img_data).decode('utf-8')
 
-def crop_image_from_page(pdf_document, page_number: int, bbox: Dict[str, float], dpi: int = 200) -> bytes:
-    """Crop a specific region from a PDF page - uses AI bounding box directly"""
+def crop_image_from_page(pdf_document, page_number: int, bbox: Dict[str, float], dpi: int = 250) -> bytes:
+    """Crop a specific region from a PDF page with generous padding"""
     page = pdf_document[page_number]
     mat = fitz.Matrix(dpi/72, dpi/72)
     pix = page.get_pixmap(matrix=mat)
     
-    # Convert to PIL Image for cropping
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    # Calculate pixel coordinates from percentages
-    x = int(bbox['x_percent'] / 100 * img.width)
-    y = int(bbox['y_percent'] / 100 * img.height)
-    w = int(bbox['width_percent'] / 100 * img.width)
-    h = int(bbox['height_percent'] / 100 * img.height)
+    # Calculate with 8% padding on all sides
+    pad = 8
+    x = int(max(0, bbox['x_percent'] - pad) / 100 * img.width)
+    y = int(max(0, bbox['y_percent'] - pad) / 100 * img.height)
+    x2 = int(min(100, bbox['x_percent'] + bbox['width_percent'] + pad) / 100 * img.width)
+    y2 = int(min(100, bbox['y_percent'] + bbox['height_percent'] + pad) / 100 * img.height)
     
-    # Clamp to image bounds - NO padding, NO trimming
-    x = max(0, x)
-    y = max(0, y)
-    w = min(img.width - x, w)
-    h = min(img.height - y, h)
-    
-    # Crop using AI's bounding box directly
-    cropped = img.crop((x, y, x + w, y + h))
+    cropped = img.crop((x, y, x2, y2))
     
     # Save to bytes
     img_byte_arr = io.BytesIO()
