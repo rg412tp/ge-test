@@ -343,38 +343,34 @@ async def _call_gemini_vision(system_prompt: str, user_prompt: str, image_base64
 async def extract_questions_from_page(page_image_base64: str, page_number: int, paper_id: str) -> Dict[str, Any]:
     """Use Gemini to extract questions from a page image"""
     try:
-        system_prompt = """You are an expert at extracting GCSE Maths exam questions from images.
-            
-Your task is to:
-1. Identify all questions on the page
-2. Extract question numbers and their parts (a, b, c, etc.)
-3. Extract the full text of each question/part
-4. Convert any mathematical expressions to LaTeX format
-5. Identify any diagrams, graphs, or tables and describe their location
-6. Estimate marks if visible
-7. Suggest relevant GCSE topics for each question
+        system_prompt = """You extract GCSE Maths exam questions from images. Return ONLY valid JSON.
 
-Return a JSON object with this structure:
+CRITICAL RULES FOR THE "text" FIELD:
+- Must be CLEAN readable English with NO LaTeX symbols
+- NO $$, NO \\(, NO \\quad, NO \\frac, NO backslashes
+- Write math as plain words: "1, 5, 9, 13" not "$$1 \\quad 5$$"
+- Write fractions as: "1/2" not "\\frac{1}{2}"  
+- Write powers as: "x^2" or "x squared"
+- Use newlines as actual newlines, not \\n
+
+RULES FOR "has_diagram":
+- Set TRUE for ANY visual element: graphs, shapes, Venn diagrams, tables with borders, coordinate grids, geometric figures, bar charts, pie charts, number lines
+- If the question references "the diagram", "the graph", "the figure", "the table" - it HAS a diagram
+- When in doubt, set TRUE
+
+Return JSON:
 {
   "questions": [
     {
       "question_number": 1,
-      "text": "Full question text here with math in words",
-      "latex": "Full question with \\( math \\) in LaTeX format",
+      "text": "Here are the first four terms of an arithmetic sequence. 1, 5, 9, 13. Find an expression, in terms of n, for the nth term of this sequence.",
       "parts": [
-        {
-          "part_label": "a",
-          "text": "Part (a) text here",
-          "latex": "Part (a) with \\( x^2 + 2x \\) LaTeX",
-          "marks": 2
-        }
+        {"part_label": "a", "text": "Clean readable part text", "marks": 2}
       ],
       "marks": 5,
       "has_diagram": true,
       "has_table": false,
-      "diagram_description": "A coordinate grid showing...",
-      "diagram_location": "below question text, centered",
-      "suggested_topics": ["quadratics", "factorisation"],
+      "suggested_topics": ["sequences"],
       "suggested_difficulty": "silver"
     }
   ],
@@ -382,11 +378,10 @@ Return a JSON object with this structure:
   "confidence": 0.95
 }
 
-Difficulty levels: bronze (Foundation), silver (Standard GCSE), gold (Higher complex).
-If blank/cover page: {"questions": [], "page_has_content": false, "confidence": 1.0}
-Be precise. Extract ALL text exactly. Convert ALL math to LaTeX."""
+Difficulty: bronze (easy), silver (standard), gold (hard).
+Blank/cover page: {"questions": [], "page_has_content": false, "confidence": 1.0}"""
 
-        user_prompt = f"Extract all GCSE Maths questions from page {page_number}. Convert math to LaTeX. Return valid JSON only."
+        user_prompt = f"Extract questions from page {page_number}. The text field must be CLEAN English - no LaTeX symbols. Return JSON only."
         
         response_text = await _call_gemini_vision(system_prompt, user_prompt, page_image_base64)
         await log_api_call(paper_id, "question_extraction")
@@ -432,18 +427,17 @@ If blank: {"entries": [], "page_has_content": false, "confidence": 1.0}"""
 async def extract_diagram_from_page(page_image_base64: str, page_number: int, paper_id: str, question_number: int) -> Dict[str, Any]:
     """Use Gemini to identify diagram boundaries for cropping"""
     try:
-        system_prompt = """Identify PRECISE diagram boundaries for clean cropping. 
-ONLY include the visual element (axes, grid, shapes, labels ON diagram). 
-Do NOT include surrounding question text.
-Coordinates as percentages (0-100). Err SMALLER not larger.
+        system_prompt = """Identify diagram boundaries for cropping. Include the COMPLETE diagram with ALL labels and numbers visible.
+Add 5% padding on all sides to avoid clipping edges.
+Coordinates as percentages (0-100).
 
 Return JSON:
 {"diagrams": [{"question_number": 1, "type": "graph", "description": "...", 
-  "bounding_box": {"x_percent": 15, "y_percent": 25, "width_percent": 65, "height_percent": 45}}],
+  "bounding_box": {"x_percent": 10, "y_percent": 20, "width_percent": 70, "height_percent": 50}}],
  "has_diagrams": true}
 If none: {"diagrams": [], "has_diagrams": false}"""
 
-        user_prompt = f"Identify TIGHT bounding boxes of diagrams on this page for question {question_number}. No question text in crop. Return valid JSON only."
+        user_prompt = f"Find ALL diagrams on this page for question {question_number}. Include full diagram with padding. Return JSON only."
         
         response_text = await _call_gemini_vision(system_prompt, user_prompt, page_image_base64)
         await log_api_call(paper_id, "diagram_detection")
