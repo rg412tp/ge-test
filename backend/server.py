@@ -33,7 +33,7 @@ db = client[os.environ.get('DB_NAME', 'ge_question_bank')]
 
 # Gemini API Key (used for ALL AI extraction)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 # Local file storage
 UPLOAD_DIR = ROOT_DIR / "uploads"
