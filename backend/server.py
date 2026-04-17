@@ -845,43 +845,33 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
             # Get classification from Gemini
             q_class = classifications.get(str(q_number), {})
             
-            # Extract diagrams if detected
+            # Extract diagrams - just crop full page area, NO Gemini calls
             image_ids = []
             if q_data.get("has_diagram"):
-                # Find which page this question is likely on
-                for page_num in range(total_pages):
-                    page_base64 = convert_page_to_base64(pdf_document, page_num)
-                    diagram_result = await extract_diagram_from_page(
-                        page_base64, page_num, paper_id, q_number
+                # Use Mathpix's knowledge - save the relevant page as diagram
+                # Estimate which page based on question position
+                est_page = min(q_number - 1, total_pages - 1)
+                try:
+                    page_base64 = convert_page_to_base64(pdf_document, est_page)
+                    img_bytes = base64.b64decode(page_base64)
+                    img_id = str(uuid.uuid4())
+                    img_path = f"{APP_NAME}/images/{paper_id}/{img_id}.png"
+                    put_object(img_path, img_bytes, "image/png")
+                    
+                    img_asset = ImageAsset(
+                        id=img_id, paper_id=paper_id,
+                        storage_path=img_path,
+                        original_filename=f"page_Q{q_number}.png",
+                        content_type="image/png",
+                        width=0, height=0,
+                        page_number=est_page + 1,
+                        description=f"Full page for Q{q_number}"
                     )
-                    if diagram_result.get("diagrams"):
-                        for diag in diagram_result["diagrams"]:
-                            if diag.get("question_number") == q_number:
-                                try:
-                                    cropped_img = crop_image_from_page(
-                                        pdf_document, page_num, diag["bounding_box"]
-                                    )
-                                    img_id = str(uuid.uuid4())
-                                    img_path = f"{APP_NAME}/images/{paper_id}/{img_id}.png"
-                                    put_object(img_path, cropped_img, "image/png")
-                                    
-                                    img_asset = ImageAsset(
-                                        id=img_id, paper_id=paper_id,
-                                        storage_path=img_path,
-                                        original_filename=f"diagram_Q{q_number}.png",
-                                        content_type="image/png",
-                                        width=int(diag["bounding_box"].get("width_percent", 0)),
-                                        height=int(diag["bounding_box"].get("height_percent", 0)),
-                                        page_number=page_num + 1,
-                                        description=diag.get("description", "")
-                                    )
-                                    await db.image_assets.insert_one(img_asset.model_dump())
-                                    image_ids.append(img_id)
-                                    images_extracted += 1
-                                except Exception as e:
-                                    logger.error(f"Error cropping Q{q_number}: {e}")
-                        if image_ids:
-                            break  # Found diagrams, stop searching pages
+                    await db.image_assets.insert_one(img_asset.model_dump())
+                    image_ids.append(img_id)
+                    images_extracted += 1
+                except Exception as e:
+                    logger.error(f"Error saving page image Q{q_number}: {e}")
             
             # Build parts with GE IDs
             parts = []
