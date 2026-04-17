@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
 import "@/App.css";
-import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
 import axios from "axios";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
+import 'katex/dist/katex.min.css';
+import { InlineMath, BlockMath } from 'react-katex';
 import { 
   FilePdf, 
   Upload, 
@@ -20,11 +22,44 @@ import {
   ArrowClockwise,
   Eye,
   Check,
-  X
+  X,
+  Tag,
+  Medal,
+  ListChecks,
+  BookOpen,
+  CaretDown,
+  Plus
 } from "@phosphor-icons/react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+
+// ============ Helper Functions ============
+const renderLatex = (text, latex) => {
+  if (!latex) return <span className="whitespace-pre-wrap">{text}</span>;
+  
+  // Parse and render LaTeX content
+  try {
+    // Split by LaTeX delimiters and render
+    const parts = latex.split(/(\\\(.*?\\\)|\\\[.*?\\\])/g);
+    return (
+      <span>
+        {parts.map((part, idx) => {
+          if (part.startsWith('\\(') && part.endsWith('\\)')) {
+            const math = part.slice(2, -2);
+            return <InlineMath key={idx} math={math} />;
+          } else if (part.startsWith('\\[') && part.endsWith('\\]')) {
+            const math = part.slice(2, -2);
+            return <BlockMath key={idx} math={math} />;
+          }
+          return <span key={idx}>{part}</span>;
+        })}
+      </span>
+    );
+  } catch (e) {
+    return <span className="whitespace-pre-wrap">{text}</span>;
+  }
+};
 
 // ============ Components ============
 
@@ -37,13 +72,123 @@ const StatusTag = ({ status }) => {
     extracted: "status-extracted",
     completed: "status-approved",
     failed: "status-needs-review",
-    pending: "status-processing"
+    pending: "status-processing",
+    linked: "status-approved"
   };
   
   return (
     <span data-testid={`status-tag-${status}`} className={`status-tag ${statusClasses[status] || "status-draft"}`}>
       {status?.replace("_", " ")}
     </span>
+  );
+};
+
+const DifficultyBadge = ({ difficulty, onChange }) => {
+  const colors = {
+    bronze: "bg-amber-100 border-amber-600 text-amber-800",
+    silver: "bg-slate-100 border-slate-500 text-slate-800",
+    gold: "bg-yellow-100 border-yellow-600 text-yellow-800"
+  };
+  
+  if (onChange) {
+    return (
+      <select
+        data-testid="difficulty-select"
+        value={difficulty || ""}
+        onChange={(e) => onChange(e.target.value)}
+        className={`text-xs px-2 py-1 border font-mono uppercase ${colors[difficulty] || "bg-white border-black"}`}
+      >
+        <option value="">Set Difficulty</option>
+        <option value="bronze">Bronze</option>
+        <option value="silver">Silver</option>
+        <option value="gold">Gold</option>
+      </select>
+    );
+  }
+  
+  if (!difficulty) return null;
+  
+  return (
+    <span className={`text-xs px-2 py-1 border font-mono uppercase ${colors[difficulty]}`}>
+      <Medal size={12} className="inline mr-1" weight="fill" />
+      {difficulty}
+    </span>
+  );
+};
+
+const TopicTags = ({ topics, allTopics, onChange }) => {
+  const [showDropdown, setShowDropdown] = useState(false);
+  
+  if (onChange) {
+    return (
+      <div className="relative">
+        <div className="flex flex-wrap gap-1 mb-2">
+          {topics?.map((topic) => (
+            <span 
+              key={topic}
+              className="text-xs px-2 py-1 border border-blue-600 bg-blue-50 text-blue-800 flex items-center gap-1"
+            >
+              {topic}
+              <button 
+                onClick={() => onChange(topics.filter(t => t !== topic))}
+                className="hover:text-red-600"
+              >
+                <X size={10} weight="bold" />
+              </button>
+            </span>
+          ))}
+          <button
+            data-testid="add-topic-btn"
+            onClick={() => setShowDropdown(!showDropdown)}
+            className="text-xs px-2 py-1 border border-dashed border-black hover:bg-slate-100"
+          >
+            <Plus size={10} className="inline" /> Add
+          </button>
+        </div>
+        {showDropdown && (
+          <div className="absolute z-10 bg-white border border-black shadow-lg max-h-48 overflow-auto w-64">
+            {Object.entries(allTopics || {}).map(([category, categoryTopics]) => (
+              <div key={category}>
+                <div className="px-2 py-1 bg-slate-100 text-xs font-bold uppercase tracking-wider">
+                  {category}
+                </div>
+                {categoryTopics.map((t) => (
+                  <button
+                    key={t.name}
+                    onClick={() => {
+                      if (!topics?.includes(t.name)) {
+                        onChange([...(topics || []), t.name]);
+                      }
+                      setShowDropdown(false);
+                    }}
+                    disabled={topics?.includes(t.name)}
+                    className="block w-full text-left px-3 py-1 text-xs hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {t.name}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+  
+  if (!topics?.length) return null;
+  
+  return (
+    <div className="flex flex-wrap gap-1">
+      {topics.map((topic) => (
+        <span 
+          key={topic}
+          className="text-xs px-2 py-1 border border-slate-400 bg-slate-50"
+        >
+          <Tag size={10} className="inline mr-1" />
+          {topic}
+        </span>
+      ))}
+    </div>
   );
 };
 
@@ -57,7 +202,7 @@ const ProgressBar = ({ value, max }) => {
 };
 
 // ============ PDF Upload Zone ============
-const PDFUploadZone = ({ paperId, onUploadComplete }) => {
+const PDFUploadZone = ({ paperId, onUploadComplete, type = "paper" }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [file, setFile] = useState(null);
@@ -97,12 +242,16 @@ const PDFUploadZone = ({ paperId, onUploadComplete }) => {
     const formData = new FormData();
     formData.append("file", file);
 
+    const endpoint = type === "markscheme" 
+      ? `${API}/papers/${paperId}/mark-scheme/upload`
+      : `${API}/papers/${paperId}/upload`;
+
     try {
-      const response = await axios.post(`${API}/papers/${paperId}/upload`, formData, {
+      const response = await axios.post(endpoint, formData, {
         headers: { "Content-Type": "multipart/form-data" }
       });
-      toast.success("PDF uploaded! Extraction started.");
-      onUploadComplete(response.data.job_id);
+      toast.success(`${type === "markscheme" ? "Mark scheme" : "PDF"} uploaded! Extraction started.`);
+      onUploadComplete(response.data.job_id || response.data.mark_scheme_id);
       setFile(null);
     } catch (error) {
       toast.error("Upload failed: " + (error.response?.data?.detail || error.message));
@@ -112,46 +261,47 @@ const PDFUploadZone = ({ paperId, onUploadComplete }) => {
   };
 
   return (
-    <div className="p-6 border-b border-black">
+    <div className="p-4 border-b border-black">
+      <div className="text-xs tracking-widest uppercase font-bold mb-2">
+        {type === "markscheme" ? "Mark Scheme" : "Question Paper"}
+      </div>
       <div
-        data-testid="pdf-upload-zone"
-        className={`dropzone ${isDragging ? "active" : ""}`}
+        data-testid={`${type}-upload-zone`}
+        className={`dropzone ${isDragging ? "active" : ""} p-6`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        onClick={() => document.getElementById("pdf-input").click()}
+        onClick={() => document.getElementById(`${type}-input`).click()}
       >
         <input
-          id="pdf-input"
-          data-testid="pdf-file-input"
+          id={`${type}-input`}
+          data-testid={`${type}-file-input`}
           type="file"
           accept=".pdf"
           className="hidden"
           onChange={handleFileSelect}
         />
         {file ? (
-          <div className="flex flex-col items-center gap-4">
-            <FilePdf size={48} weight="duotone" />
-            <p className="font-mono text-sm">{file.name}</p>
-            <p className="text-xs text-slate-500">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+          <div className="flex flex-col items-center gap-2">
+            <FilePdf size={32} weight="duotone" />
+            <p className="font-mono text-xs">{file.name}</p>
           </div>
         ) : (
-          <div className="flex flex-col items-center gap-4">
-            <Upload size={48} weight="duotone" />
-            <p className="font-mono text-sm">Drop PDF here or click to select</p>
-            <p className="text-xs text-slate-500">GCSE Maths Question Papers</p>
+          <div className="flex flex-col items-center gap-2">
+            <Upload size={32} weight="duotone" />
+            <p className="font-mono text-xs">Drop {type === "markscheme" ? "mark scheme" : "PDF"}</p>
           </div>
         )}
       </div>
       
       {file && (
         <button
-          data-testid="upload-pdf-btn"
+          data-testid={`upload-${type}-btn`}
           onClick={handleUpload}
           disabled={uploading || !paperId}
-          className="btn-primary w-full mt-4 disabled:opacity-50"
+          className="btn-primary w-full mt-2 text-sm py-2 disabled:opacity-50"
         >
-          {uploading ? "Uploading..." : "Start Extraction"}
+          {uploading ? "Uploading..." : "Extract"}
         </button>
       )}
     </div>
@@ -186,16 +336,16 @@ const PaperForm = ({ onPaperCreated }) => {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="p-6 border-b border-black">
-      <h3 className="font-sans text-lg font-semibold mb-4">New Paper</h3>
-      <div className="grid grid-cols-2 gap-4">
+    <form onSubmit={handleSubmit} className="p-4 border-b border-black">
+      <h3 className="font-sans text-base font-semibold mb-3">New Paper</h3>
+      <div className="grid grid-cols-2 gap-3">
         <div>
           <label className="text-xs tracking-widest uppercase font-bold block mb-1">Board</label>
           <select
             data-testid="paper-board-select"
             value={formData.board}
             onChange={(e) => setFormData({...formData, board: e.target.value})}
-            className="w-full border border-black p-2 bg-white"
+            className="w-full border border-black p-2 bg-white text-sm"
           >
             <option value="AQA">AQA</option>
             <option value="Edexcel">Edexcel</option>
@@ -209,7 +359,7 @@ const PaperForm = ({ onPaperCreated }) => {
             type="number"
             value={formData.exam_year}
             onChange={(e) => setFormData({...formData, exam_year: parseInt(e.target.value)})}
-            className="w-full border border-black p-2"
+            className="w-full border border-black p-2 text-sm"
           />
         </div>
         <div>
@@ -218,7 +368,7 @@ const PaperForm = ({ onPaperCreated }) => {
             data-testid="paper-number-select"
             value={formData.paper_number}
             onChange={(e) => setFormData({...formData, paper_number: e.target.value})}
-            className="w-full border border-black p-2 bg-white"
+            className="w-full border border-black p-2 bg-white text-sm"
           >
             <option value="1">Paper 1</option>
             <option value="2">Paper 2</option>
@@ -231,22 +381,10 @@ const PaperForm = ({ onPaperCreated }) => {
             data-testid="paper-tier-select"
             value={formData.tier}
             onChange={(e) => setFormData({...formData, tier: e.target.value})}
-            className="w-full border border-black p-2 bg-white"
+            className="w-full border border-black p-2 bg-white text-sm"
           >
             <option value="Higher">Higher</option>
             <option value="Foundation">Foundation</option>
-          </select>
-        </div>
-        <div>
-          <label className="text-xs tracking-widest uppercase font-bold block mb-1">Session</label>
-          <select
-            data-testid="paper-session-select"
-            value={formData.session}
-            onChange={(e) => setFormData({...formData, session: e.target.value})}
-            className="w-full border border-black p-2 bg-white"
-          >
-            <option value="June">June</option>
-            <option value="November">November</option>
           </select>
         </div>
       </div>
@@ -254,7 +392,7 @@ const PaperForm = ({ onPaperCreated }) => {
         data-testid="create-paper-btn"
         type="submit" 
         disabled={creating}
-        className="btn-primary w-full mt-4"
+        className="btn-primary w-full mt-3 text-sm py-2"
       >
         {creating ? "Creating..." : "Create Paper"}
       </button>
@@ -293,7 +431,7 @@ const ExtractionStatus = ({ jobId, onComplete }) => {
   if (!job) return null;
 
   return (
-    <div data-testid="extraction-status" className="p-6 border-b border-black bg-slate-50">
+    <div data-testid="extraction-status" className="p-4 border-b border-black bg-slate-50">
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs tracking-widest uppercase font-bold">Extraction</span>
         <StatusTag status={job.status} />
@@ -311,28 +449,61 @@ const ExtractionStatus = ({ jobId, onComplete }) => {
 // ============ Question List ============
 const QuestionList = ({ questions, selectedId, onSelect }) => {
   const [filter, setFilter] = useState("all");
+  const [topicFilter, setTopicFilter] = useState("");
+  const [difficultyFilter, setDifficultyFilter] = useState("");
   
   const filteredQuestions = questions.filter(q => {
-    if (filter === "all") return true;
-    return q.status === filter;
+    if (filter !== "all" && q.status !== filter) return false;
+    if (topicFilter && !q.topics?.includes(topicFilter)) return false;
+    if (difficultyFilter && q.difficulty !== difficultyFilter) return false;
+    return true;
   });
+
+  // Get unique topics from questions
+  const uniqueTopics = [...new Set(questions.flatMap(q => q.topics || []))];
 
   return (
     <div className="h-full flex flex-col">
       {/* Filter bar */}
-      <div className="p-4 border-b border-black flex items-center gap-2">
-        <Funnel size={16} weight="bold" />
-        <select
-          data-testid="question-filter-select"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          className="border border-black px-2 py-1 text-xs bg-white"
-        >
-          <option value="all">All ({questions.length})</option>
-          <option value="draft">Draft</option>
-          <option value="needs_review">Needs Review</option>
-          <option value="approved">Approved</option>
-        </select>
+      <div className="p-3 border-b border-black space-y-2">
+        <div className="flex items-center gap-2">
+          <Funnel size={14} weight="bold" />
+          <select
+            data-testid="question-filter-select"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            className="border border-black px-2 py-1 text-xs bg-white flex-1"
+          >
+            <option value="all">All ({questions.length})</option>
+            <option value="draft">Draft</option>
+            <option value="needs_review">Needs Review</option>
+            <option value="approved">Approved</option>
+          </select>
+        </div>
+        <div className="flex gap-2">
+          <select
+            data-testid="topic-filter-select"
+            value={topicFilter}
+            onChange={(e) => setTopicFilter(e.target.value)}
+            className="border border-black px-2 py-1 text-xs bg-white flex-1"
+          >
+            <option value="">All Topics</option>
+            {uniqueTopics.map(t => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+          <select
+            data-testid="difficulty-filter-select"
+            value={difficultyFilter}
+            onChange={(e) => setDifficultyFilter(e.target.value)}
+            className="border border-black px-2 py-1 text-xs bg-white flex-1"
+          >
+            <option value="">All Levels</option>
+            <option value="bronze">Bronze</option>
+            <option value="silver">Silver</option>
+            <option value="gold">Gold</option>
+          </select>
+        </div>
       </div>
       
       {/* Question rows */}
@@ -343,51 +514,62 @@ const QuestionList = ({ questions, selectedId, onSelect }) => {
             <p className="text-sm">No questions found</p>
           </div>
         ) : (
-          filteredQuestions.map((question) => (
+              filteredQuestions.map((question) => (
             <div
               key={question.id}
               data-testid={`question-row-${question.question_number}`}
               onClick={() => onSelect(question)}
-              className={`p-4 border-b border-black cursor-pointer transition-colors ${
+              className={`p-3 border-b border-black cursor-pointer transition-colors ${
                 selectedId === question.id ? "bg-slate-100" : "hover:bg-slate-50"
               }`}
             >
               <div className="flex items-start justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="font-sans font-bold text-lg">Q{question.question_number}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-sans font-bold text-base">Q{question.question_number}</span>
+                  {question.ge_id && (
+                    <span className="text-xs font-mono px-1 border border-blue-800 bg-blue-50 text-blue-800">{question.ge_id}</span>
+                  )}
                   <div className="flex gap-1">
                     {question.has_diagram && (
                       <span title="Has diagram" className="p-1 border border-slate-400">
-                        <ChartLine size={14} />
+                        <ChartLine size={12} />
                       </span>
                     )}
                     {question.has_table && (
                       <span title="Has table" className="p-1 border border-slate-400">
-                        <Table size={14} />
+                        <Table size={12} />
                       </span>
                     )}
-                    {question.images?.length > 0 && (
-                      <span title={`${question.images.length} image(s)`} className="p-1 border border-slate-400">
-                        <ImageIcon size={14} />
+                    {question.mark_scheme && (
+                      <span title="Has mark scheme" className="p-1 border border-green-500 bg-green-50">
+                        <ListChecks size={12} />
                       </span>
                     )}
                   </div>
                 </div>
-                <StatusTag status={question.status} />
+                <div className="flex items-center gap-2">
+                  <DifficultyBadge difficulty={question.difficulty} />
+                  <StatusTag status={question.status} />
+                </div>
               </div>
-              <p className="text-xs text-slate-600 mt-2 line-clamp-2">{question.text}</p>
+              <p className="text-xs text-slate-600 mt-1 line-clamp-2">{question.text}</p>
               {question.parts?.length > 0 && (
-                <div className="mt-2 text-xs text-slate-500">
-                  Parts: {question.parts.map(p => p.part_label).join(", ")}
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {question.parts.map(p => (
+                    <span key={p.part_label} className="text-xs font-mono px-1 border border-slate-300 bg-slate-50">
+                      {p.ge_id || `(${p.part_label})`}
+                    </span>
+                  ))}
                 </div>
               )}
-              <div className="flex items-center justify-between mt-2">
-                <span className="text-xs text-slate-500">
-                  {question.marks ? `${question.marks} marks` : ""}
-                </span>
-                <span className="text-xs text-slate-500">
-                  Confidence: {(question.confidence * 100).toFixed(0)}%
-                </span>
+              {question.topics?.length > 0 && (
+                <div className="mt-2">
+                  <TopicTags topics={question.topics?.slice(0, 3)} />
+                </div>
+              )}
+              <div className="flex items-center justify-between mt-2 text-xs text-slate-500">
+                <span>{question.marks ? `${question.marks} marks` : ""}</span>
+                <span>{question.parts?.length || 0} parts</span>
               </div>
             </div>
           ))
@@ -397,14 +579,74 @@ const QuestionList = ({ questions, selectedId, onSelect }) => {
   );
 };
 
+// ============ Mark Scheme Panel ============
+const MarkSchemePanel = ({ question, entries }) => {
+  if (!question?.mark_scheme && !entries?.length) {
+    return (
+      <div className="p-4 text-center text-slate-500 text-sm">
+        <BookOpen size={32} className="mx-auto mb-2" />
+        No mark scheme linked
+      </div>
+    );
+  }
+
+  return (
+    <div className="border border-black">
+      <div className="p-3 bg-green-50 border-b border-black">
+        <span className="text-xs tracking-widest uppercase font-bold flex items-center gap-2">
+          <ListChecks size={14} /> Mark Scheme
+        </span>
+      </div>
+      
+      {question?.mark_scheme && (
+        <div className="p-3 border-b border-black">
+          <div className="text-sm">
+            {renderLatex(question.mark_scheme, question.mark_scheme_latex)}
+          </div>
+        </div>
+      )}
+      
+      {entries?.map((entry, idx) => (
+        <div key={entry.id || idx} className="p-3 border-b border-black last:border-b-0">
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-bold text-sm">
+              Q{entry.question_number}{entry.part_label ? `(${entry.part_label})` : ""}
+            </span>
+            <div className="flex gap-2 text-xs">
+              {entry.method_marks > 0 && <span className="px-1 border border-blue-500 bg-blue-50">M{entry.method_marks}</span>}
+              {entry.accuracy_marks > 0 && <span className="px-1 border border-green-500 bg-green-50">A{entry.accuracy_marks}</span>}
+              {entry.b_marks > 0 && <span className="px-1 border border-purple-500 bg-purple-50">B{entry.b_marks}</span>}
+              <span className="font-bold">[{entry.marks}]</span>
+            </div>
+          </div>
+          <div className="text-sm mb-2">
+            {renderLatex(entry.text, entry.latex)}
+          </div>
+          {entry.acceptable_alternatives?.length > 0 && (
+            <div className="text-xs text-slate-600 mt-1">
+              <strong>Also accept:</strong> {entry.acceptable_alternatives.join(", ")}
+            </div>
+          )}
+          {entry.follow_through_notes && (
+            <div className="text-xs text-blue-600 mt-1">
+              <strong>FT:</strong> {entry.follow_through_notes}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
+
 // ============ Question Detail ============
-const QuestionDetail = ({ question, onUpdate, onClose }) => {
+const QuestionDetail = ({ question, onUpdate, allTopics }) => {
   const [images, setImages] = useState([]);
+  const [markSchemeEntries, setMarkSchemeEntries] = useState([]);
   const [updating, setUpdating] = useState(false);
+  const [showMarkScheme, setShowMarkScheme] = useState(false);
 
   useEffect(() => {
     if (question?.images?.length > 0) {
-      // Fetch image data
       Promise.all(
         question.images.map(async (imgId) => {
           try {
@@ -417,6 +659,13 @@ const QuestionDetail = ({ question, onUpdate, onClose }) => {
       ).then((imgs) => setImages(imgs.filter(Boolean)));
     } else {
       setImages([]);
+    }
+
+    // Fetch mark scheme entries
+    if (question?.id) {
+      axios.get(`${API}/questions/${question.id}/mark-scheme`)
+        .then(res => setMarkSchemeEntries(res.data))
+        .catch(() => setMarkSchemeEntries([]));
     }
   }, [question]);
 
@@ -446,6 +695,26 @@ const QuestionDetail = ({ question, onUpdate, onClose }) => {
     }
   };
 
+  const handleDifficultyChange = async (difficulty) => {
+    try {
+      await axios.patch(`${API}/questions/${question.id}/difficulty?difficulty=${difficulty}`);
+      toast.success("Difficulty updated");
+      onUpdate();
+    } catch (error) {
+      toast.error("Failed to update difficulty");
+    }
+  };
+
+  const handleTopicsChange = async (topics) => {
+    try {
+      await axios.patch(`${API}/questions/${question.id}/topics`, topics);
+      toast.success("Topics updated");
+      onUpdate();
+    } catch (error) {
+      toast.error("Failed to update topics");
+    }
+  };
+
   if (!question) {
     return (
       <div className="h-full flex items-center justify-center text-slate-500">
@@ -460,57 +729,92 @@ const QuestionDetail = ({ question, onUpdate, onClose }) => {
   return (
     <div data-testid="question-detail" className="h-full flex flex-col overflow-auto">
       {/* Header */}
-      <div className="p-6 border-b border-black flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <h2 className="font-sans text-2xl font-bold">Question {question.question_number}</h2>
+      <div className="p-4 border-b border-black flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h2 className="font-sans text-xl font-bold">Q{question.question_number}</h2>
+          {question.ge_id && (
+            <span className="text-xs font-mono px-2 py-1 border-2 border-blue-800 bg-blue-50 text-blue-800 font-bold">{question.ge_id}</span>
+          )}
           <StatusTag status={question.status} />
         </div>
         <div className="flex gap-2">
           <button
+            data-testid="toggle-markscheme-btn"
+            onClick={() => setShowMarkScheme(!showMarkScheme)}
+            className={`px-3 py-2 border border-black text-xs flex items-center gap-1 ${showMarkScheme ? "bg-green-50" : ""}`}
+          >
+            <ListChecks size={14} />
+            {showMarkScheme ? "Hide" : "Show"} MS
+          </button>
+          <button
             data-testid="approve-question-btn"
             onClick={handleApprove}
             disabled={updating || question.status === "approved"}
-            className="btn-primary flex items-center gap-2 disabled:opacity-50"
+            className="btn-primary flex items-center gap-1 text-sm py-2 px-3 disabled:opacity-50"
           >
-            <Check size={16} weight="bold" />
+            <Check size={14} weight="bold" />
             Approve
           </button>
           <button
             data-testid="reject-question-btn"
             onClick={handleReject}
             disabled={updating}
-            className="btn-secondary flex items-center gap-2"
+            className="btn-secondary flex items-center gap-1 text-sm py-2 px-3"
           >
-            <X size={16} weight="bold" />
+            <X size={14} weight="bold" />
             Reject
           </button>
         </div>
       </div>
       
       {/* Content */}
-      <div className="flex-1 p-6 overflow-auto">
-        {/* Question text */}
-        <div className="mb-6">
-          <label className="text-xs tracking-widest uppercase font-bold block mb-2">Question Text</label>
+      <div className="flex-1 p-4 overflow-auto">
+        {/* Difficulty & Topics */}
+        <div className="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label className="text-xs tracking-widest uppercase font-bold block mb-2">Difficulty</label>
+            <DifficultyBadge difficulty={question.difficulty} onChange={handleDifficultyChange} />
+          </div>
+          <div>
+            <label className="text-xs tracking-widest uppercase font-bold block mb-2">Topics</label>
+            <TopicTags 
+              topics={question.topics} 
+              allTopics={allTopics}
+              onChange={handleTopicsChange}
+            />
+          </div>
+        </div>
+
+        {/* Question text with LaTeX */}
+        <div className="mb-4">
+          <label className="text-xs tracking-widest uppercase font-bold block mb-2">Question</label>
           <div className="border border-black p-4 bg-slate-50">
-            <p className="whitespace-pre-wrap">{question.text}</p>
+            {renderLatex(question.text, question.latex)}
           </div>
         </div>
         
         {/* Parts */}
         {question.parts?.length > 0 && (
-          <div className="mb-6">
+          <div className="mb-4">
             <label className="text-xs tracking-widest uppercase font-bold block mb-2">Parts</label>
             <div className="border border-black">
               {question.parts.map((part, idx) => (
-                <div key={idx} className="p-4 border-b border-black last:border-b-0">
+                <div key={idx} className="p-3 border-b border-black last:border-b-0">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="font-bold">({part.part_label})</span>
+                    {part.ge_id && (
+                      <span className="text-xs font-mono px-1 border border-blue-800 bg-blue-50 text-blue-800">{part.ge_id}</span>
+                    )}
                     {part.marks && (
-                      <span className="text-xs text-slate-500">[{part.marks} marks]</span>
+                      <span className="text-xs px-2 py-0.5 border border-black">{part.marks} marks</span>
                     )}
                   </div>
-                  <p className="whitespace-pre-wrap text-sm">{part.text}</p>
+                  <div className="text-sm">{renderLatex(part.text, part.latex)}</div>
+                  {part.mark_scheme && (
+                    <div className="mt-2 p-2 bg-green-50 border-l-2 border-green-600 text-xs">
+                      <strong>Mark Scheme:</strong> {renderLatex(part.mark_scheme, part.mark_scheme_latex)}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -519,41 +823,51 @@ const QuestionDetail = ({ question, onUpdate, onClose }) => {
         
         {/* Images/Diagrams */}
         {images.length > 0 && (
-          <div className="mb-6">
+          <div className="mb-4">
             <label className="text-xs tracking-widest uppercase font-bold block mb-2">
-              Diagrams & Figures ({images.length})
+              Diagrams ({images.length})
             </label>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-3">
               {images.map((img) => (
                 <div
                   key={img.id}
                   data-testid={`diagram-${img.id}`}
-                  data-label={`Fig ${img.page_number}.${images.indexOf(img) + 1}`}
-                  className="diagram-container"
+                  className="border border-black p-2 relative"
                 >
+                  <div className="absolute -top-2 left-2 bg-white px-1 text-xs font-mono">
+                    Fig {img.page_number}
+                  </div>
                   <img
                     src={`${API}/images/${img.id}/download`}
                     alt={img.description || "Diagram"}
                     className="w-full h-auto"
                   />
-                  {img.description && (
-                    <p className="text-xs text-slate-500 mt-2">{img.description}</p>
-                  )}
                 </div>
               ))}
             </div>
           </div>
         )}
+
+        {/* Mark Scheme Panel */}
+        {showMarkScheme && (
+          <div className="mb-4">
+            <MarkSchemePanel question={question} entries={markSchemeEntries} />
+          </div>
+        )}
         
         {/* Metadata */}
-        <div className="grid grid-cols-2 gap-4">
-          <div className="border border-black p-4">
+        <div className="grid grid-cols-3 gap-3">
+          <div className="border border-black p-3">
             <label className="text-xs tracking-widest uppercase font-bold block mb-1">Marks</label>
             <p className="text-lg font-bold">{question.marks || "—"}</p>
           </div>
-          <div className="border border-black p-4">
+          <div className="border border-black p-3">
             <label className="text-xs tracking-widest uppercase font-bold block mb-1">Confidence</label>
             <p className="text-lg font-bold">{(question.confidence * 100).toFixed(0)}%</p>
+          </div>
+          <div className="border border-black p-3">
+            <label className="text-xs tracking-widest uppercase font-bold block mb-1">Parts</label>
+            <p className="text-lg font-bold">{question.parts?.length || 0}</p>
           </div>
         </div>
       </div>
@@ -565,13 +879,13 @@ const QuestionDetail = ({ question, onUpdate, onClose }) => {
 const PapersList = ({ papers, selectedId, onSelect }) => {
   return (
     <div className="border-b border-black">
-      <div className="p-4 border-b border-black">
+      <div className="p-3 border-b border-black">
         <label className="text-xs tracking-widest uppercase font-bold">Papers</label>
       </div>
-      <div className="max-h-48 overflow-auto">
+      <div className="max-h-32 overflow-auto">
         {papers.length === 0 ? (
-          <div className="p-4 text-center text-slate-500 text-sm">
-            No papers yet. Create one above.
+          <div className="p-3 text-center text-slate-500 text-xs">
+            No papers yet
           </div>
         ) : (
           papers.map((paper) => (
@@ -579,20 +893,20 @@ const PapersList = ({ papers, selectedId, onSelect }) => {
               key={paper.id}
               data-testid={`paper-row-${paper.id}`}
               onClick={() => onSelect(paper)}
-              className={`p-3 border-b border-slate-200 cursor-pointer flex items-center justify-between ${
+              className={`p-2 border-b border-slate-200 cursor-pointer flex items-center justify-between text-sm ${
                 selectedId === paper.id ? "bg-slate-100" : "hover:bg-slate-50"
               }`}
             >
               <div>
                 <span className="font-semibold">{paper.board}</span>
-                <span className="text-slate-500 ml-2">
-                  {paper.session} {paper.exam_year} - Paper {paper.paper_number}
+                <span className="text-slate-500 ml-1 text-xs">
+                  {paper.exam_year} P{paper.paper_number}
                 </span>
+                {paper.ge_code && (
+                  <span className="ml-2 text-xs font-mono px-1 border border-blue-800 bg-blue-50 text-blue-800">{paper.ge_code}</span>
+                )}
               </div>
-              <div className="flex items-center gap-2">
-                <StatusTag status={paper.status} />
-                <CaretRight size={16} />
-              </div>
+              <StatusTag status={paper.status} />
             </div>
           ))
         )}
@@ -606,23 +920,27 @@ const StatsCard = ({ stats }) => {
   if (!stats) return null;
   
   return (
-    <div className="p-4 border-b border-black bg-slate-50">
-      <div className="grid grid-cols-4 gap-4 text-center">
+    <div className="p-3 border-b border-black bg-slate-50">
+      <div className="grid grid-cols-5 gap-2 text-center">
         <div>
-          <p className="text-2xl font-bold">{stats.total_papers}</p>
+          <p className="text-xl font-bold">{stats.total_papers}</p>
           <p className="text-xs text-slate-500">Papers</p>
         </div>
         <div>
-          <p className="text-2xl font-bold">{stats.total_questions}</p>
+          <p className="text-xl font-bold">{stats.total_questions}</p>
           <p className="text-xs text-slate-500">Questions</p>
         </div>
         <div>
-          <p className="text-2xl font-bold text-green-600">{stats.approved_questions}</p>
+          <p className="text-xl font-bold text-green-600">{stats.approved_questions}</p>
           <p className="text-xs text-slate-500">Approved</p>
         </div>
         <div>
-          <p className="text-2xl font-bold text-amber-600">{stats.pending_review}</p>
+          <p className="text-xl font-bold text-amber-600">{stats.pending_review}</p>
           <p className="text-xs text-slate-500">Review</p>
+        </div>
+        <div>
+          <p className="text-xl font-bold text-blue-600">{stats.total_mark_schemes || 0}</p>
+          <p className="text-xs text-slate-500">Schemes</p>
         </div>
       </div>
     </div>
@@ -638,15 +956,18 @@ const Dashboard = () => {
   const [extractionJobId, setExtractionJobId] = useState(null);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [allTopics, setAllTopics] = useState({});
 
   const fetchData = useCallback(async () => {
     try {
-      const [papersRes, statsRes] = await Promise.all([
+      const [papersRes, statsRes, topicsRes] = await Promise.all([
         axios.get(`${API}/papers`),
-        axios.get(`${API}/stats`)
+        axios.get(`${API}/stats`),
+        axios.get(`${API}/topics/categories`)
       ]);
       setPapers(papersRes.data);
       setStats(statsRes.data);
+      setAllTopics(topicsRes.data);
     } catch (error) {
       console.error("Failed to fetch data:", error);
     } finally {
@@ -700,6 +1021,12 @@ const Dashboard = () => {
     if (selectedPaper) {
       fetchQuestions(selectedPaper.id);
     }
+    // Refresh selected question
+    if (selectedQuestion) {
+      axios.get(`${API}/questions/${selectedQuestion.id}`)
+        .then(res => setSelectedQuestion(res.data))
+        .catch(() => {});
+    }
     fetchData();
   };
 
@@ -718,26 +1045,24 @@ const Dashboard = () => {
     <div className="min-h-screen" data-testid="dashboard">
       {/* Header */}
       <header className="border-b border-black">
-        <div className="p-6 flex items-center justify-between">
+        <div className="p-4 flex items-center justify-between">
           <div>
-            <h1 className="font-sans text-3xl font-bold tracking-tight">GCSE Question Bank</h1>
-            <p className="text-sm text-slate-600 mt-1">Extract and manage exam questions</p>
+            <h1 className="font-sans text-2xl font-bold tracking-tight">GCSE Question Bank</h1>
+            <p className="text-xs text-slate-600 mt-1">Extract • Review • Organise</p>
           </div>
-          <div className="flex items-center gap-4">
-            <button
-              data-testid="refresh-btn"
-              onClick={fetchData}
-              className="p-2 border border-black hover:bg-black hover:text-white transition-colors"
-            >
-              <ArrowClockwise size={20} />
-            </button>
-          </div>
+          <button
+            data-testid="refresh-btn"
+            onClick={fetchData}
+            className="p-2 border border-black hover:bg-black hover:text-white transition-colors"
+          >
+            <ArrowClockwise size={18} />
+          </button>
         </div>
         <StatsCard stats={stats} />
       </header>
 
       {/* Main content - dual pane */}
-      <div className="dual-pane" style={{ height: "calc(100vh - 180px)" }}>
+      <div className="dual-pane" style={{ height: "calc(100vh - 140px)" }}>
         {/* Left pane - Upload & Papers */}
         <div className="border-r border-black flex flex-col overflow-hidden">
           <PaperForm onPaperCreated={handlePaperCreated} />
@@ -748,18 +1073,28 @@ const Dashboard = () => {
           />
           
           {selectedPaper && (
-            <>
+            <div className="grid grid-cols-2 border-b border-black">
               <PDFUploadZone 
                 paperId={selectedPaper.id} 
                 onUploadComplete={handleUploadComplete}
+                type="paper"
               />
-              {extractionJobId && (
-                <ExtractionStatus 
-                  jobId={extractionJobId} 
-                  onComplete={handleExtractionComplete}
-                />
-              )}
-            </>
+              <PDFUploadZone 
+                paperId={selectedPaper.id} 
+                onUploadComplete={() => {
+                  toast.success("Mark scheme processing...");
+                  setTimeout(() => fetchQuestions(selectedPaper.id), 5000);
+                }}
+                type="markscheme"
+              />
+            </div>
+          )}
+          
+          {extractionJobId && (
+            <ExtractionStatus 
+              jobId={extractionJobId} 
+              onComplete={handleExtractionComplete}
+            />
           )}
           
           {/* Question list */}
@@ -779,7 +1114,7 @@ const Dashboard = () => {
           <QuestionDetail
             question={selectedQuestion}
             onUpdate={handleQuestionUpdate}
-            onClose={() => setSelectedQuestion(null)}
+            allTopics={allTopics}
           />
         </div>
       </div>

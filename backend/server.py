@@ -108,6 +108,7 @@ class Paper(BaseModel):
     status: str = "processing"  # processing, extracted, reviewed
     pdf_path: Optional[str] = None
     total_questions: int = 0
+    ge_code: Optional[str] = None  # e.g., GE-2017-P1
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class QuestionPart(BaseModel):
@@ -117,6 +118,9 @@ class QuestionPart(BaseModel):
     marks: Optional[int] = None
     images: List[str] = []  # List of image asset IDs
     confidence: float = 0.0
+    mark_scheme: Optional[str] = None  # Mark scheme for this part
+    mark_scheme_latex: Optional[str] = None
+    ge_id: Optional[str] = None  # e.g., GE-2017-P1-Q01A
 
 class Question(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -133,7 +137,89 @@ class Question(BaseModel):
     status: str = "draft"  # draft, needs_review, approved
     confidence: float = 0.0
     review_reason_codes: List[str] = []
+    # New fields for difficulty and topics
+    difficulty: Optional[str] = None  # bronze, silver, gold
+    topics: List[str] = []  # e.g., ["algebra", "quadratics", "factorisation"]
+    mark_scheme: Optional[str] = None  # Overall mark scheme text
+    mark_scheme_latex: Optional[str] = None
+    mark_scheme_id: Optional[str] = None  # Link to mark scheme document
+    ge_id: Optional[str] = None  # e.g., GE-2017-P1-Q01 (parent)
+    parent_ge_id: Optional[str] = None  # Parent GE ID for hierarchy
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+# Mark Scheme Models
+class MarkSchemeCreate(BaseModel):
+    paper_id: str
+
+class MarkScheme(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    paper_id: str
+    pdf_path: Optional[str] = None
+    status: str = "pending"  # pending, processing, extracted, linked
+    total_entries: int = 0
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+class MarkSchemeEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    mark_scheme_id: str
+    paper_id: str
+    question_number: int
+    part_label: Optional[str] = None
+    marks: int = 0
+    method_marks: int = 0  # M marks
+    accuracy_marks: int = 0  # A marks
+    b_marks: int = 0  # B marks
+    text: str = ""
+    latex: Optional[str] = None
+    acceptable_alternatives: List[str] = []
+    follow_through_notes: Optional[str] = None
+    reasoning_notes: Optional[str] = None
+    linked_question_id: Optional[str] = None
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+# Topic/Tag Model
+class Topic(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    category: str  # e.g., "Number", "Algebra", "Geometry", "Statistics"
+    description: Optional[str] = None
+
+# Predefined topics for GCSE Maths
+GCSE_TOPICS = [
+    {"name": "number-operations", "category": "Number", "description": "Basic operations, BIDMAS"},
+    {"name": "fractions", "category": "Number", "description": "Fractions, decimals, percentages"},
+    {"name": "ratio-proportion", "category": "Number", "description": "Ratio and proportion"},
+    {"name": "percentages", "category": "Number", "description": "Percentage calculations"},
+    {"name": "indices", "category": "Number", "description": "Powers and roots"},
+    {"name": "standard-form", "category": "Number", "description": "Standard form notation"},
+    {"name": "surds", "category": "Number", "description": "Surd manipulation"},
+    {"name": "algebraic-expressions", "category": "Algebra", "description": "Simplifying expressions"},
+    {"name": "linear-equations", "category": "Algebra", "description": "Solving linear equations"},
+    {"name": "quadratics", "category": "Algebra", "description": "Quadratic equations and graphs"},
+    {"name": "factorisation", "category": "Algebra", "description": "Factorising expressions"},
+    {"name": "simultaneous-equations", "category": "Algebra", "description": "Solving simultaneous equations"},
+    {"name": "inequalities", "category": "Algebra", "description": "Linear and quadratic inequalities"},
+    {"name": "sequences", "category": "Algebra", "description": "Arithmetic and geometric sequences"},
+    {"name": "functions", "category": "Algebra", "description": "Function notation and graphs"},
+    {"name": "angles", "category": "Geometry", "description": "Angle properties"},
+    {"name": "triangles", "category": "Geometry", "description": "Triangle properties and congruence"},
+    {"name": "circles", "category": "Geometry", "description": "Circle theorems"},
+    {"name": "area-perimeter", "category": "Geometry", "description": "Area and perimeter calculations"},
+    {"name": "volume-surface-area", "category": "Geometry", "description": "3D shapes"},
+    {"name": "trigonometry", "category": "Geometry", "description": "Sin, cos, tan"},
+    {"name": "pythagoras", "category": "Geometry", "description": "Pythagoras theorem"},
+    {"name": "transformations", "category": "Geometry", "description": "Translations, rotations, reflections"},
+    {"name": "vectors", "category": "Geometry", "description": "Vector operations"},
+    {"name": "coordinates", "category": "Geometry", "description": "Coordinate geometry"},
+    {"name": "probability", "category": "Statistics", "description": "Probability calculations"},
+    {"name": "data-handling", "category": "Statistics", "description": "Collecting and representing data"},
+    {"name": "averages", "category": "Statistics", "description": "Mean, median, mode, range"},
+    {"name": "cumulative-frequency", "category": "Statistics", "description": "Cumulative frequency and box plots"},
+    {"name": "histograms", "category": "Statistics", "description": "Histogram interpretation"},
+]
 
 class ImageAsset(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -178,19 +264,23 @@ Your task is to:
 1. Identify all questions on the page
 2. Extract question numbers and their parts (a, b, c, etc.)
 3. Extract the full text of each question/part
-4. Identify any diagrams, graphs, or tables and describe their location
-5. Estimate marks if visible
+4. Convert any mathematical expressions to LaTeX format
+5. Identify any diagrams, graphs, or tables and describe their location
+6. Estimate marks if visible
+7. Suggest relevant GCSE topics for each question
 
 Return a JSON object with this structure:
 {
   "questions": [
     {
       "question_number": 1,
-      "text": "Full question text here",
+      "text": "Full question text here with math in words",
+      "latex": "Full question with \\\\( math \\\\) in LaTeX format",
       "parts": [
         {
           "part_label": "a",
           "text": "Part (a) text here",
+          "latex": "Part (a) with \\\\( x^2 + 2x \\\\) LaTeX",
           "marks": 2
         }
       ],
@@ -198,23 +288,30 @@ Return a JSON object with this structure:
       "has_diagram": true,
       "has_table": false,
       "diagram_description": "A coordinate grid showing...",
-      "diagram_location": "below question text, centered"
+      "diagram_location": "below question text, centered",
+      "suggested_topics": ["quadratics", "factorisation"],
+      "suggested_difficulty": "silver"
     }
   ],
   "page_has_content": true,
   "confidence": 0.95
 }
 
+Difficulty levels:
+- bronze: Foundation tier, basic skills
+- silver: Standard GCSE level
+- gold: Higher tier, complex problems
+
 If this is a blank page or cover page with no questions, return:
 {"questions": [], "page_has_content": false, "confidence": 1.0}
 
-Be precise and extract ALL text exactly as written. For mathematical expressions, include them in plain text."""
+Be precise and extract ALL text exactly as written. Convert ALL mathematical expressions to LaTeX."""
         ).with_model("openai", "gpt-5.2")
         
         image_content = ImageContent(image_base64=page_image_base64)
         user_message = UserMessage(
-            text=f"Extract all GCSE Maths questions from page {page_number} of this exam paper. Return the result as valid JSON.",
-            image_contents=[image_content]
+            text=f"Extract all GCSE Maths questions from page {page_number} of this exam paper. Convert all mathematical expressions to LaTeX. Return the result as valid JSON.",
+            file_contents=[image_content]
         )
         
         response = await chat.send_message(user_message)
@@ -236,6 +333,72 @@ Be precise and extract ALL text exactly as written. For mathematical expressions
     except Exception as e:
         logger.error(f"Error extracting questions from page {page_number}: {e}")
         return {"questions": [], "page_has_content": False, "confidence": 0.0, "error": str(e)}
+
+async def extract_mark_scheme_from_page(page_image_base64: str, page_number: int, mark_scheme_id: str) -> Dict[str, Any]:
+    """Use GPT-5.2 to extract mark scheme entries from a page image"""
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_KEY,
+            session_id=f"markscheme-{mark_scheme_id}-page-{page_number}",
+            system_message="""You are an expert at extracting GCSE Maths mark schemes from images.
+
+Your task is to:
+1. Identify all mark scheme entries on the page
+2. Extract question numbers and parts
+3. Extract the marking criteria and acceptable answers
+4. Identify mark allocations (M for method, A for accuracy, B for standard marks)
+5. Note any alternative acceptable answers
+6. Extract follow-through rules and reasoning notes
+7. Convert mathematical expressions to LaTeX
+
+Return a JSON object with this structure:
+{
+  "entries": [
+    {
+      "question_number": 1,
+      "part_label": "a",
+      "marks": 2,
+      "method_marks": 1,
+      "accuracy_marks": 1,
+      "b_marks": 0,
+      "text": "Factorisation of x² + 5x + 6 = (x+2)(x+3)",
+      "latex": "Factorisation of \\\\( x^2 + 5x + 6 = (x+2)(x+3) \\\\)",
+      "acceptable_alternatives": ["(x+3)(x+2)"],
+      "follow_through_notes": "FT from part (a) if attempted",
+      "reasoning_notes": "Award M1 for attempt at factorisation"
+    }
+  ],
+  "page_has_content": true,
+  "confidence": 0.95
+}
+
+If this is a blank page or no mark scheme content, return:
+{"entries": [], "page_has_content": false, "confidence": 1.0}"""
+        ).with_model("openai", "gpt-5.2")
+        
+        image_content = ImageContent(image_base64=page_image_base64)
+        user_message = UserMessage(
+            text=f"Extract all mark scheme entries from page {page_number}. Convert mathematical expressions to LaTeX. Return valid JSON.",
+            file_contents=[image_content]
+        )
+        
+        response = await chat.send_message(user_message)
+        
+        import json
+        response_text = response.strip()
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.startswith("```"):
+            response_text = response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+        
+        result = json.loads(response_text.strip())
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error extracting mark scheme from page {page_number}: {e}")
+        return {"entries": [], "page_has_content": False, "confidence": 0.0, "error": str(e)}
 
 async def extract_diagram_from_page(page_image_base64: str, page_number: int, paper_id: str, question_number: int) -> Dict[str, Any]:
     """Use GPT-5.2 to identify and describe diagram boundaries for cropping"""
@@ -274,7 +437,7 @@ Be precise with boundaries - ensure no text bleeds into the diagram crop."""
         image_content = ImageContent(image_base64=page_image_base64)
         user_message = UserMessage(
             text=f"Identify the bounding boxes of all diagrams, graphs, figures, or tables on this page. Focus on question {question_number} if specified. Return valid JSON.",
-            image_contents=[image_content]
+            file_contents=[image_content]
         )
         
         response = await chat.send_message(user_message)
@@ -334,6 +497,19 @@ def crop_image_from_page(pdf_document, page_number: int, bbox: Dict[str, float],
     cropped.save(img_byte_arr, format='PNG', optimize=True)
     return img_byte_arr.getvalue()
 
+# ============ GE ID Generation ============
+def generate_ge_code(exam_year: int, paper_number: str) -> str:
+    """Generate GE code for a paper: GE-2017-P1"""
+    return f"GE-{exam_year}-P{paper_number}"
+
+def generate_ge_question_id(ge_code: str, question_number: int) -> str:
+    """Generate GE ID for a question: GE-2017-P1-Q01"""
+    return f"{ge_code}-Q{str(question_number).zfill(2)}"
+
+def generate_ge_part_id(ge_question_id: str, part_label: str) -> str:
+    """Generate GE ID for a sub-part: GE-2017-P1-Q01A"""
+    return f"{ge_question_id}{part_label.upper()}"
+
 # ============ API Endpoints ============
 @api_router.get("/")
 async def root():
@@ -347,6 +523,8 @@ async def health():
 @api_router.post("/papers", response_model=Paper)
 async def create_paper(paper_data: PaperCreate):
     paper = Paper(**paper_data.model_dump())
+    # Generate GE code
+    paper.ge_code = generate_ge_code(paper.exam_year, paper.paper_number)
     doc = paper.model_dump()
     await db.papers.insert_one(doc)
     return paper
@@ -410,6 +588,10 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
             {"$set": {"status": "processing", "started_at": datetime.now(timezone.utc).isoformat()}}
         )
         
+        # Get paper for GE code
+        paper = await db.papers.find_one({"id": paper_id}, {"_id": 0})
+        ge_code = paper.get("ge_code", f"GE-{paper.get('exam_year', 0)}-P{paper.get('paper_number', '1')}")
+        
         # Open PDF
         pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
         total_pages = len(pdf_document)
@@ -433,10 +615,13 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                 
                 if extraction_result.get("questions"):
                     for q_data in extraction_result["questions"]:
+                        q_number = q_data["question_number"]
+                        ge_question_id = generate_ge_question_id(ge_code, q_number)
+                        
                         # Check for diagrams
                         if q_data.get("has_diagram") or q_data.get("has_table"):
                             diagram_result = await extract_diagram_from_page(
-                                page_base64, page_num, paper_id, q_data["question_number"]
+                                page_base64, page_num, paper_id, q_number
                             )
                             
                             # Crop and save diagrams
@@ -479,26 +664,35 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                             
                             q_data["images"] = image_ids
                         
-                        # Create question record
+                        # Create question record with GE IDs
                         parts = []
                         for part_data in q_data.get("parts", []):
+                            part_label = part_data.get("part_label", "")
+                            ge_part_id = generate_ge_part_id(ge_question_id, part_label) if part_label else None
                             parts.append(QuestionPart(
-                                part_label=part_data.get("part_label", ""),
+                                part_label=part_label,
                                 text=part_data.get("text", ""),
+                                latex=part_data.get("latex"),
                                 marks=part_data.get("marks"),
-                                confidence=extraction_result.get("confidence", 0.8)
+                                confidence=extraction_result.get("confidence", 0.8),
+                                ge_id=ge_part_id
                             ))
                         
                         question = Question(
                             paper_id=paper_id,
                             question_number=q_data["question_number"],
                             text=q_data.get("text", ""),
+                            latex=q_data.get("latex"),
                             parts=parts,
                             marks=q_data.get("marks"),
                             images=q_data.get("images", []),
                             has_diagram=q_data.get("has_diagram", False),
                             has_table=q_data.get("has_table", False),
                             confidence=extraction_result.get("confidence", 0.8),
+                            difficulty=q_data.get("suggested_difficulty"),
+                            topics=q_data.get("suggested_topics", []),
+                            ge_id=ge_question_id,
+                            parent_ge_id=ge_code,
                             status="needs_review" if extraction_result.get("confidence", 0) < 0.9 else "draft"
                         )
                         
@@ -596,7 +790,7 @@ async def get_question(question_id: str):
 async def update_question(question_id: str, updates: Dict[str, Any]):
     """Update a question (for review/approval workflow)"""
     # Filter allowed update fields
-    allowed_fields = ["text", "latex", "marks", "status", "parts", "review_reason_codes"]
+    allowed_fields = ["text", "latex", "marks", "status", "parts", "review_reason_codes", "difficulty", "topics", "mark_scheme", "mark_scheme_latex"]
     filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
     
     if not filtered_updates:
@@ -679,14 +873,279 @@ async def get_stats():
     approved_questions = await db.questions.count_documents({"status": "approved"})
     pending_review = await db.questions.count_documents({"status": "needs_review"})
     total_images = await db.image_assets.count_documents({"is_deleted": False})
+    total_mark_schemes = await db.mark_schemes.count_documents({})
     
     return {
         "total_papers": total_papers,
         "total_questions": total_questions,
         "approved_questions": approved_questions,
         "pending_review": pending_review,
-        "total_images": total_images
+        "total_images": total_images,
+        "total_mark_schemes": total_mark_schemes
     }
+
+# ============ Topic Endpoints ============
+@api_router.get("/topics")
+async def list_topics():
+    """Get all available topics"""
+    return GCSE_TOPICS
+
+@api_router.get("/topics/categories")
+async def list_topic_categories():
+    """Get topic categories"""
+    categories = {}
+    for topic in GCSE_TOPICS:
+        cat = topic["category"]
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(topic)
+    return categories
+
+# ============ Mark Scheme Endpoints ============
+@api_router.post("/papers/{paper_id}/mark-scheme/upload")
+async def upload_mark_scheme(paper_id: str, file: UploadFile = File(...)):
+    """Upload a mark scheme PDF and start extraction"""
+    # Verify paper exists
+    paper = await db.papers.find_one({"id": paper_id}, {"_id": 0})
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+    
+    # Read PDF content
+    pdf_content = await file.read()
+    
+    # Upload to object storage
+    storage_path = f"{APP_NAME}/mark-schemes/{paper_id}/{uuid.uuid4()}.pdf"
+    try:
+        put_object(storage_path, pdf_content, "application/pdf")
+    except Exception as e:
+        logger.error(f"Failed to upload mark scheme to storage: {e}")
+        raise HTTPException(status_code=500, detail="Failed to store mark scheme")
+    
+    # Create mark scheme record
+    mark_scheme = MarkScheme(paper_id=paper_id, pdf_path=storage_path, status="processing")
+    await db.mark_schemes.insert_one(mark_scheme.model_dump())
+    
+    # Start extraction in background
+    asyncio.create_task(process_mark_scheme_extraction(paper_id, pdf_content, mark_scheme.id))
+    
+    return {"message": "Mark scheme uploaded successfully", "mark_scheme_id": mark_scheme.id, "paper_id": paper_id}
+
+async def process_mark_scheme_extraction(paper_id: str, pdf_content: bytes, mark_scheme_id: str):
+    """Background task to extract mark scheme entries from PDF"""
+    try:
+        # Open PDF
+        pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
+        total_pages = len(pdf_document)
+        
+        all_entries = []
+        
+        # Process each page
+        for page_num in range(total_pages):
+            try:
+                # Convert page to image
+                page_base64 = convert_page_to_base64(pdf_document, page_num)
+                
+                # Extract mark scheme using AI
+                extraction_result = await extract_mark_scheme_from_page(page_base64, page_num + 1, mark_scheme_id)
+                
+                if extraction_result.get("entries"):
+                    for entry_data in extraction_result["entries"]:
+                        entry = MarkSchemeEntry(
+                            mark_scheme_id=mark_scheme_id,
+                            paper_id=paper_id,
+                            question_number=entry_data.get("question_number", 0),
+                            part_label=entry_data.get("part_label"),
+                            marks=entry_data.get("marks", 0),
+                            method_marks=entry_data.get("method_marks", 0),
+                            accuracy_marks=entry_data.get("accuracy_marks", 0),
+                            b_marks=entry_data.get("b_marks", 0),
+                            text=entry_data.get("text", ""),
+                            latex=entry_data.get("latex"),
+                            acceptable_alternatives=entry_data.get("acceptable_alternatives", []),
+                            follow_through_notes=entry_data.get("follow_through_notes"),
+                            reasoning_notes=entry_data.get("reasoning_notes")
+                        )
+                        await db.mark_scheme_entries.insert_one(entry.model_dump())
+                        all_entries.append(entry)
+                        
+            except Exception as e:
+                logger.error(f"Error processing mark scheme page {page_num}: {e}")
+        
+        pdf_document.close()
+        
+        # Update mark scheme status
+        await db.mark_schemes.update_one(
+            {"id": mark_scheme_id},
+            {"$set": {"status": "extracted", "total_entries": len(all_entries)}}
+        )
+        
+        # Auto-link entries to questions
+        await link_mark_scheme_to_questions(paper_id, mark_scheme_id)
+        
+        logger.info(f"Mark scheme extraction completed: {len(all_entries)} entries")
+        
+    except Exception as e:
+        logger.error(f"Mark scheme extraction failed: {e}")
+        await db.mark_schemes.update_one(
+            {"id": mark_scheme_id},
+            {"$set": {"status": "failed"}}
+        )
+
+async def link_mark_scheme_to_questions(paper_id: str, mark_scheme_id: str):
+    """Auto-link mark scheme entries to questions"""
+    # Get all questions for this paper
+    questions = await db.questions.find({"paper_id": paper_id}, {"_id": 0}).to_list(500)
+    
+    # Get all mark scheme entries
+    entries = await db.mark_scheme_entries.find(
+        {"mark_scheme_id": mark_scheme_id},
+        {"_id": 0}
+    ).to_list(500)
+    
+    linked_count = 0
+    
+    for entry in entries:
+        # Find matching question
+        for question in questions:
+            if question["question_number"] == entry["question_number"]:
+                # Update the entry with question link
+                await db.mark_scheme_entries.update_one(
+                    {"id": entry["id"]},
+                    {"$set": {"linked_question_id": question["id"]}}
+                )
+                
+                # If it's a part-level entry, update the part
+                if entry.get("part_label"):
+                    # Update the specific part's mark scheme
+                    parts = question.get("parts", [])
+                    for i, part in enumerate(parts):
+                        if part.get("part_label") == entry["part_label"]:
+                            parts[i]["mark_scheme"] = entry["text"]
+                            parts[i]["mark_scheme_latex"] = entry.get("latex")
+                            parts[i]["marks"] = entry["marks"]
+                    await db.questions.update_one(
+                        {"id": question["id"]},
+                        {"$set": {"parts": parts}}
+                    )
+                else:
+                    # Update question-level mark scheme
+                    await db.questions.update_one(
+                        {"id": question["id"]},
+                        {"$set": {
+                            "mark_scheme": entry["text"],
+                            "mark_scheme_latex": entry.get("latex"),
+                            "mark_scheme_id": mark_scheme_id,
+                            "marks": entry["marks"]
+                        }}
+                    )
+                
+                linked_count += 1
+                break
+    
+    # Update mark scheme status to linked
+    await db.mark_schemes.update_one(
+        {"id": mark_scheme_id},
+        {"$set": {"status": "linked"}}
+    )
+    
+    logger.info(f"Linked {linked_count} mark scheme entries to questions")
+
+@api_router.get("/papers/{paper_id}/mark-scheme")
+async def get_paper_mark_scheme(paper_id: str):
+    """Get mark scheme for a paper"""
+    mark_scheme = await db.mark_schemes.find_one(
+        {"paper_id": paper_id},
+        {"_id": 0},
+        sort=[("created_at", -1)]
+    )
+    if not mark_scheme:
+        raise HTTPException(status_code=404, detail="No mark scheme found for this paper")
+    return mark_scheme
+
+@api_router.get("/mark-scheme-entries")
+async def list_mark_scheme_entries(
+    paper_id: Optional[str] = None,
+    mark_scheme_id: Optional[str] = None,
+    question_number: Optional[int] = None
+):
+    """List mark scheme entries with optional filters"""
+    query = {}
+    if paper_id:
+        query["paper_id"] = paper_id
+    if mark_scheme_id:
+        query["mark_scheme_id"] = mark_scheme_id
+    if question_number:
+        query["question_number"] = question_number
+    
+    entries = await db.mark_scheme_entries.find(query, {"_id": 0}).to_list(500)
+    return entries
+
+@api_router.get("/questions/{question_id}/mark-scheme")
+async def get_question_mark_scheme(question_id: str):
+    """Get mark scheme entries linked to a specific question"""
+    entries = await db.mark_scheme_entries.find(
+        {"linked_question_id": question_id},
+        {"_id": 0}
+    ).to_list(50)
+    return entries
+
+# ============ Question Update Endpoints for Tags/Difficulty ============
+@api_router.patch("/questions/{question_id}/difficulty")
+async def update_question_difficulty(question_id: str, difficulty: str):
+    """Update question difficulty level"""
+    if difficulty not in ["bronze", "silver", "gold"]:
+        raise HTTPException(status_code=400, detail="Invalid difficulty. Use: bronze, silver, gold")
+    
+    result = await db.questions.update_one(
+        {"id": question_id},
+        {"$set": {"difficulty": difficulty}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return {"message": "Difficulty updated", "difficulty": difficulty}
+
+@api_router.patch("/questions/{question_id}/topics")
+async def update_question_topics(question_id: str, topics: List[str]):
+    """Update question topics"""
+    # Validate topics against predefined list
+    valid_topic_names = [t["name"] for t in GCSE_TOPICS]
+    invalid_topics = [t for t in topics if t not in valid_topic_names]
+    if invalid_topics:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid topics: {invalid_topics}. Use valid topic names from /api/topics"
+        )
+    
+    result = await db.questions.update_one(
+        {"id": question_id},
+        {"$set": {"topics": topics}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return {"message": "Topics updated", "topics": topics}
+
+@api_router.get("/questions/by-topic/{topic}")
+async def get_questions_by_topic(topic: str, status: Optional[str] = None):
+    """Get all questions with a specific topic"""
+    query = {"topics": topic}
+    if status:
+        query["status"] = status
+    questions = await db.questions.find(query, {"_id": 0}).to_list(500)
+    return questions
+
+@api_router.get("/questions/by-difficulty/{difficulty}")
+async def get_questions_by_difficulty(difficulty: str, status: Optional[str] = None):
+    """Get all questions with a specific difficulty"""
+    if difficulty not in ["bronze", "silver", "gold"]:
+        raise HTTPException(status_code=400, detail="Invalid difficulty")
+    query = {"difficulty": difficulty}
+    if status:
+        query["status"] = status
+    questions = await db.questions.find(query, {"_id": 0}).to_list(500)
+    return questions
 
 # Include the router in the main app
 app.include_router(api_router)
