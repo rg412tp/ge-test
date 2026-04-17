@@ -24,8 +24,7 @@ services:
     container_name: ge-frontend
     restart: always
     ports:
-      - "80:80"
-      - "443:443"
+      - "3000:80"
     depends_on:
       - backend
     networks:
