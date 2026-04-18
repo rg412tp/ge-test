@@ -34,3 +34,4 @@ test_reports/
 memory/
 project_backup.zip
 yarn.lock
+frontend/node_modules/.cache/default-development/0.pack

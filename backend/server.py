@@ -528,27 +528,62 @@ def clean_text(text: str) -> str:
     t = re.sub(r'\n{3,}', '\n\n', t)
     return t.strip()
 
-async def classify_questions_with_gemini(questions_text: str, paper_id: str) -> dict:
-    """ONE Gemini call to classify ALL questions"""
+async def classify_and_structure_with_gemini(mmd_content: str, paper_id: str) -> list:
+    """ONE Gemini call: takes Mathpix markdown and returns structured questions with classification"""
     try:
         client = _init_gemini_client()
-        prompt = f"""Classify these GCSE Maths questions. Return JSON only.
-For each question number: "difficulty" (bronze/silver/gold) and "topics" (1-3 from: number-operations, fractions, ratio-proportion, percentages, indices, standard-form, surds, algebraic-expressions, linear-equations, quadratics, factorisation, simultaneous-equations, inequalities, sequences, functions, angles, triangles, circles, area-perimeter, volume-surface-area, trigonometry, pythagoras, transformations, vectors, coordinates, probability, data-handling, averages, cumulative-frequency, histograms).
-
-Questions:
-{questions_text}
-
-Return: {{"1": {{"difficulty": "silver", "topics": ["quadratics"]}}, "2": ...}}"""
+        # Truncate if too long (Gemini context limit)
+        content = mmd_content[:30000] if len(mmd_content) > 30000 else mmd_content
         
+        prompt = f"""You are parsing a GCSE Maths exam paper. Below is the full content extracted by Mathpix OCR.
+
+YOUR JOB: Identify each exam question and return structured JSON. 
+
+RULES:
+- GCSE papers have 20-25 questions numbered 1 to ~25
+- Numbers like "80" in text are NOT question numbers - they are data/values within questions
+- Page numbers, mark totals, "TOTAL FOR PAPER" are NOT questions
+- Questions have parts like (a), (b), (c)
+- If an image URL appears near a question, attach it to that question
+- Tables (markdown | pipes) belong to the question above them
+- "Blue cards", "Red cards" etc are CONTENT within a question, not separate questions
+- Extract marks from patterns like "(2 marks)", "(Total for question = 5 marks)"
+
+Return ONLY this JSON:
+{{
+  "questions": [
+    {{
+      "question_number": 1,
+      "text": "Complete clean question text including all context",
+      "latex": "Same text with LaTeX math preserved from Mathpix",
+      "parts": [
+        {{"part_label": "a", "text": "Part a text", "latex": "Part a with LaTeX", "marks": 2}}
+      ],
+      "marks": 5,
+      "has_diagram": true,
+      "has_table": false,
+      "image_urls": ["https://...any image URLs from the content..."],
+      "difficulty": "bronze|silver|gold",
+      "topics": ["topic1", "topic2"]
+    }}
+  ]
+}}
+
+Topics must be from: number-operations, fractions, ratio-proportion, percentages, indices, standard-form, surds, algebraic-expressions, linear-equations, quadratics, factorisation, simultaneous-equations, inequalities, sequences, functions, angles, triangles, circles, area-perimeter, volume-surface-area, trigonometry, pythagoras, transformations, vectors, coordinates, probability, data-handling, averages, cumulative-frequency, histograms
+
+MATHPIX CONTENT:
+{content}"""
+
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
         )
-        await log_api_call(paper_id, "gemini_classification")
-        return _parse_json_response(response.text)
+        await log_api_call(paper_id, "gemini_structure_classify")
+        result = _parse_json_response(response.text)
+        return result.get("questions", [])
     except Exception as e:
-        logger.error(f"Gemini classification error: {e}")
-        return {}
+        logger.error(f"Gemini structuring error: {e}")
+        return []
 
 
 async def extract_mark_scheme_from_page(page_image_base64: str, page_number: int, mark_scheme_id: str) -> Dict[str, Any]:
@@ -808,7 +843,7 @@ async def re_extract_paper(paper_id: str):
     return {"message": "Re-extraction started", "job_id": job.id, "paper_id": paper_id}
 
 async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str):
-    """Mathpix extracts EVERYTHING (text, LaTeX, images, tables). Gemini classifies once."""
+    """Mathpix gets raw content. Gemini structures it. 2 API calls total."""
     try:
         await db.extraction_jobs.update_one(
             {"id": job_id},
@@ -822,56 +857,44 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
         
         pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
         total_pages = len(pdf_document)
+        pdf_document.close()
         
         await db.extraction_jobs.update_one(
-            {"id": job_id}, {"$set": {"total_pages": total_pages}}
+            {"id": job_id}, {"$set": {"total_pages": total_pages, "processed_pages": 1}}
         )
         
-        # STEP 1: Mathpix - ONE call extracts text + LaTeX + images + tables
-        logger.info(f"Submitting {total_pages} pages to Mathpix")
-        await log_api_call(paper_id, "mathpix_pdf_submit")
+        # CALL 1: Mathpix - raw extraction
+        logger.info(f"Mathpix: submitting {total_pages} pages")
+        await log_api_call(paper_id, "mathpix_pdf")
         mathpix_pdf_id = mathpix_submit_pdf(pdf_content)
-        
-        await db.extraction_jobs.update_one(
-            {"id": job_id}, {"$set": {"processed_pages": 2}}
-        )
-        
-        # Wait for Mathpix
         mathpix_poll_status(mathpix_pdf_id)
-        
-        # Get markdown (has image URLs embedded)
         mmd_content = mathpix_get_mmd(mathpix_pdf_id)
-        logger.info(f"Mathpix: {len(mmd_content)} chars markdown")
+        logger.info(f"Mathpix done: {len(mmd_content)} chars")
         
         await db.extraction_jobs.update_one(
             {"id": job_id}, {"$set": {"processed_pages": total_pages // 2}}
         )
         
-        # STEP 2: Parse into questions (images come as URLs from Mathpix)
-        parsed_questions = parse_mathpix_mmd(mmd_content)
-        logger.info(f"Parsed {len(parsed_questions)} questions")
-        
-        # STEP 3: ONE Gemini call to classify all questions
-        questions_summary = "\n".join([
-            f"Q{q['question_number']}: {q['text'][:200]}"
-            for q in parsed_questions
-        ])
-        classifications = await classify_questions_with_gemini(questions_summary, paper_id)
+        # CALL 2: Gemini - structure + classify in one call
+        logger.info("Gemini: structuring questions")
+        structured_questions = await classify_and_structure_with_gemini(mmd_content, paper_id)
+        logger.info(f"Gemini done: {len(structured_questions)} questions")
         
         await db.extraction_jobs.update_one(
             {"id": job_id}, {"$set": {"processed_pages": total_pages - 1}}
         )
         
-        # STEP 4: Save questions with Mathpix images
+        # Save to database
         all_questions = []
         images_extracted = 0
         
-        for q_data in parsed_questions:
-            q_number = q_data["question_number"]
+        for q_data in structured_questions:
+            q_number = q_data.get("question_number", 0)
+            if q_number <= 0:
+                continue
             ge_question_id = generate_ge_question_id(ge_code, q_number)
-            q_class = classifications.get(str(q_number), {})
             
-            # Download and save Mathpix images locally
+            # Download Mathpix images
             image_ids = []
             for img_url in q_data.get("image_urls", []):
                 try:
@@ -879,98 +902,59 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                     img_id = str(uuid.uuid4())
                     img_path = f"{APP_NAME}/images/{paper_id}/{img_id}.png"
                     put_object(img_path, img_bytes, "image/png")
-                    
                     img_asset = ImageAsset(
-                        id=img_id, paper_id=paper_id,
-                        storage_path=img_path,
-                        original_filename=f"mathpix_Q{q_number}.png",
-                        content_type="image/png",
+                        id=img_id, paper_id=paper_id, storage_path=img_path,
+                        original_filename=f"Q{q_number}.png", content_type="image/png",
                         width=0, height=0, page_number=0,
-                        description=f"Mathpix extracted diagram Q{q_number}"
+                        description=f"Diagram Q{q_number}"
                     )
                     await db.image_assets.insert_one(img_asset.model_dump())
                     image_ids.append(img_id)
                     images_extracted += 1
                 except Exception as e:
-                    logger.error(f"Error downloading Mathpix image: {e}")
+                    logger.error(f"Image download error: {e}")
             
             # Build parts
             parts = []
-            for part_data in q_data.get("parts", []):
-                part_label = part_data.get("part_label", "")
-                ge_part_id = generate_ge_part_id(ge_question_id, part_label) if part_label else None
-                # Parts also get their own images + parent images
-                part_img_ids = list(image_ids)
-                for pimg_url in part_data.get("image_urls", []):
-                    try:
-                        img_bytes = download_image(pimg_url)
-                        img_id = str(uuid.uuid4())
-                        img_path = f"{APP_NAME}/images/{paper_id}/{img_id}.png"
-                        put_object(img_path, img_bytes, "image/png")
-                        img_asset = ImageAsset(
-                            id=img_id, paper_id=paper_id, storage_path=img_path,
-                            original_filename=f"mathpix_Q{q_number}{part_label}.png",
-                            content_type="image/png", width=0, height=0, page_number=0,
-                            description=f"Diagram Q{q_number}({part_label})"
-                        )
-                        await db.image_assets.insert_one(img_asset.model_dump())
-                        part_img_ids.append(img_id)
-                        images_extracted += 1
-                    except Exception as e:
-                        logger.error(f"Error downloading part image: {e}")
-                
+            for p in q_data.get("parts", []):
+                pl = p.get("part_label", "")
+                ge_part_id = generate_ge_part_id(ge_question_id, pl) if pl else None
                 parts.append(QuestionPart(
-                    part_label=part_label,
-                    text=part_data.get("text", ""),
-                    latex=part_data.get("latex"),
-                    marks=part_data.get("marks"),
-                    confidence=0.95,
-                    ge_id=ge_part_id,
-                    images=part_img_ids
+                    part_label=pl, text=clean_text(p.get("text", "")),
+                    latex=p.get("latex"), marks=p.get("marks"),
+                    confidence=0.95, ge_id=ge_part_id, images=image_ids
                 ))
             
             question = Question(
-                paper_id=paper_id,
-                question_number=q_number,
-                text=q_data.get("text", ""),
-                latex=q_data.get("latex"),
-                parts=parts,
-                marks=q_data.get("marks"),
-                images=image_ids,
-                has_diagram=q_data.get("has_diagram", False),
-                has_table=q_data.get("has_table", False),
-                confidence=0.95,
-                difficulty=q_class.get("difficulty"),
-                topics=q_class.get("topics", []),
-                ge_id=ge_question_id,
-                parent_ge_id=ge_code,
-                status="draft"
+                paper_id=paper_id, question_number=q_number,
+                text=clean_text(q_data.get("text", "")), latex=q_data.get("latex"),
+                parts=parts, marks=q_data.get("marks"), images=image_ids,
+                has_diagram=q_data.get("has_diagram", len(image_ids) > 0),
+                has_table=q_data.get("has_table", False), confidence=0.95,
+                difficulty=q_data.get("difficulty"), topics=q_data.get("topics", []),
+                ge_id=ge_question_id, parent_ge_id=ge_code, status="draft"
             )
-            
             await db.questions.insert_one(question.model_dump())
             all_questions.append(question)
         
-        pdf_document.close()
-        
         await db.extraction_jobs.update_one(
             {"id": job_id},
-            {"$set": {
-                "status": "completed", "processed_pages": total_pages,
-                "questions_found": len(all_questions), "images_extracted": images_extracted,
-                "completed_at": datetime.now(timezone.utc).isoformat()
-            }}
+            {"$set": {"status": "completed", "processed_pages": total_pages,
+                      "questions_found": len(all_questions), "images_extracted": images_extracted,
+                      "completed_at": datetime.now(timezone.utc).isoformat()}}
         )
         await db.papers.update_one(
             {"id": paper_id},
             {"$set": {"status": "extracted", "total_questions": len(all_questions)}}
         )
-        logger.info(f"Done: {len(all_questions)} questions, {images_extracted} images (Mathpix + 1 Gemini call)")
+        logger.info(f"Done: {len(all_questions)} questions, {images_extracted} images (1 Mathpix + 1 Gemini)")
         
     except Exception as e:
         logger.error(f"Extraction failed: {e}")
         await db.extraction_jobs.update_one(
             {"id": job_id},
-            {"$set": {"status": "failed", "error_message": str(e), "completed_at": datetime.now(timezone.utc).isoformat()}}
+            {"$set": {"status": "failed", "error_message": str(e),
+                      "completed_at": datetime.now(timezone.utc).isoformat()}}
         )
         await db.papers.update_one({"id": paper_id}, {"$set": {"status": "failed"}})
 
