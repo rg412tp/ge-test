@@ -1065,13 +1065,22 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                 except Exception as e:
                     logger.error(f"Image download error: {e}")
             
-            # Build parts
+            # Build parts (skip parts without valid part_label)
             parts = []
             for p in q_data.get("parts", []):
-                pl = p.get("part_label", "")
-                ge_part_id = generate_ge_part_id(ge_question_id, pl) if pl else None
+                pl = p.get("part_label") or ""  # Handle None values
+                if not pl or not pl.strip():  # Skip empty/None part labels
+                    logger.debug(f"Skipping part without label in Q{q_number}")
+                    continue
+
+                part_text = p.get("text", "").strip()
+                if not part_text:  # Skip parts with no text
+                    logger.debug(f"Skipping part {pl} in Q{q_number} - no text")
+                    continue
+
+                ge_part_id = generate_ge_part_id(ge_question_id, pl)
                 parts.append(QuestionPart(
-                    part_label=pl, text=clean_text(p.get("text", "")),
+                    part_label=pl.strip(), text=clean_text(part_text),
                     latex=p.get("latex"), marks=p.get("marks"),
                     confidence=0.95, ge_id=ge_part_id, images=image_ids
                 ))
