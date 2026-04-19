@@ -396,6 +396,73 @@ curl http://187.124.54.5:9001/api/health
 
 ---
 
+---
+
+## Secret Storage Architecture - Production vs Test
+
+### How Secrets Flow Into Docker Containers
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ PRODUCTION (/opt/ge) - ✅ WORKING                           │
+├─────────────────────────────────────────────────────────────┤
+│ 1. DISK                                                     │
+│    /opt/ge/backend/.env.production                          │
+│    ├─ MONGO_URL=mongodb://admin:PASSWORD@mongo:27017       │
+│    ├─ GEMINI_API_KEY=AIzaSyD5TAgHP.....                    │
+│    └─ MATHPIX_APP_ID=geniuseducation_1bf00a_260351         │
+│                                                              │
+│ 2. docker-compose.yml (Line 6-7)                           │
+│    env_file:                                                │
+│      - ./backend/.env.production   ← LOADS SECRETS          │
+│                                                              │
+│ 3. Docker Container (docker inspect ge-backend)             │
+│    "Env": [                                                  │
+│      "MONGO_URL=mongodb://admin:IS...@mongo:27017",        │
+│      "GEMINI_API_KEY=.......",                              │
+│      "MATHPIX_APP_ID=geniuseducation_1bf00a_260351",      │
+│      ...                                                     │
+│    ]                                                        │
+│                                                              │
+│ 4. Application (backend/server.py:30)                       │
+│    mongo_url = os.environ.get('MONGO_URL')  ← HAS VALUE     │
+│    client = AsyncIOMotorClient(mongo_url)   ← CONNECTS ✅   │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ TEST (/opt/ge-test) - ❌ BROKEN                             │
+├─────────────────────────────────────────────────────────────┤
+│ 1. DISK                                                     │
+│    /opt/ge-test/backend/.env.production                     │
+│    ├─ MONGO_URL=mongodb://admin:PASSWORD@mongo-test:27017  │
+│    ├─ GEMINI_API_KEY=AIzaSyD5TA...........                  │
+│    └─ ❌ MISSING MATHPIX_APP_ID                            │
+│                                                              │
+│ 2. docker-compose.yml                                       │
+│    ❌ NOT LOADING env_file!                                 │
+│    (either missing directive or wrong path)                │
+│                                                              │
+│ 3. Docker Container (docker inspect ge-test-backend)        │
+│    "Env": [                                                  │
+│      "PATH=/usr/local/bin:/...",    ← Only defaults!        │
+│      "LANG=C.UTF-8",                                        │
+│      "PYTHON_VERSION=3.11.15",                              │
+│      ... NO MONGO_URL, NO CREDENTIALS                       │
+│    ]                                                        │
+│                                                              │
+│ 4. Application (backend/server.py:30)                       │
+│    mongo_url = os.environ.get('MONGO_URL')  ← RETURNS None! │
+│    client = AsyncIOMotorClient(None)        ← CRASHES ❌    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key Insight
+**Secrets are stored the SAME way in both environments (disk files).**
+**The difference is HOW docker-compose.yml loads them into containers.**
+
+---
+
 ## Last Updated
 2026-04-19 - Full codebase analysis completed
 2026-04-19 - Fixed environment configuration and added docker-compose.test.yml
+2026-04-19 - Analyzed secret storage flow: Production (working) vs Test (broken)
