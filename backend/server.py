@@ -559,12 +559,19 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
     return questions
 
 def clean_text(text: str) -> str:
-    """Clean LaTeX for readable display - removes image URLs, font commands, strikethrough, etc."""
+    """Clean LaTeX for readable display - removes image URLs, font commands, tables, etc."""
     t = text
 
     # Remove image URLs (both markdown and plain CDN URLs)
     t = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', '', t)  # Remove markdown images
     t = re.sub(r'https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)', '', t)  # Remove image URLs
+
+    # Remove LaTeX tables entirely (convert to simple text representation)
+    # Handles \begin{tabular}...\end{tabular} blocks
+    t = re.sub(r'\\begin\{tabular\}[^\}]*\}', '', t)  # Remove tabular begin
+    t = re.sub(r'\\end\{tabular\}', '', t)  # Remove tabular end
+    t = re.sub(r'\\hline', '', t)  # Remove horizontal lines
+    t = re.sub(r'&', '|', t)  # Convert column separators to pipes for readability
 
     # Remove strikethrough formatting (~~text~~)
     t = re.sub(r'~~([^~]*)~~', r'\1', t)
@@ -576,47 +583,68 @@ def clean_text(text: str) -> str:
     t = re.sub(r'\\\(|\\\)', '', t)
     t = re.sub(r'\\\[|\\\]', '', t)
 
-    # Handle LaTeX commands that wrap text
+    # Handle special LaTeX commands with arguments
+    t = re.sub(r'\\oldsymbol\{([^}]*)\}', r'\1', t)  # \oldsymbol{t} -> t
     t = re.sub(r'\\text\{([^}]*)\}', r'\1', t)
     t = re.sub(r'\\mathrm\{([^}]*)\}', r'\1', t)  # \mathrm{m} -> m
+    t = re.sub(r'\\mathbf\{([^}]*)\}', r'\1', t)  # \mathbf{text} -> text
+    t = re.sub(r'\\mathit\{([^}]*)\}', r'\1', t)  # \mathit{text} -> text
     t = re.sub(r'\\rm\s+([^\s\\}]+)', r'\1', t)  # \rm text -> text
     t = re.sub(r'\\bf\s+([^\s\\}]+)', r'\1', t)  # Bold: \bf text -> text
     t = re.sub(r'\\it\s+([^\s\\}]+)', r'\1', t)  # Italic: \it text -> text
 
-    # Handle fractions and roots
-    t = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1/\2', t)
-    t = re.sub(r'\\sqrt\{([^}]*)\}', r'sqrt(\1)', t)
+    # Handle fractions and roots (including inline variations)
+    t = re.sub(r'\\frac\s*\{\s*([^}]*)\s*\}\s*\{\s*([^}]*)\s*\}', r'\1/\2', t)
+    t = re.sub(r'\\sqrt\s*\{\s*([^}]*)\s*\}', r'√(\1)', t)
 
-    # Spacing commands
+    # Spacing and structural commands
     t = re.sub(r'\\(quad|qquad|,|;|!)\s*', ' ', t)
+    t = re.sub(r'\\ldots', '...', t)  # Ellipsis
+    t = re.sub(r'\\\\\s*', ' ', t)  # Line breaks in tables
 
-    # Math symbols
+    # Math relations and comparison operators
+    t = re.sub(r'\\leq|\\leqslant', '≤', t)
+    t = re.sub(r'\\geq|\\geqslant', '≥', t)
+    t = re.sub(r'\\neq', '≠', t)
+    t = re.sub(r'\\approx', '≈', t)
+    t = re.sub(r'\\propto', '∝', t)
+
+    # Math symbols and operators
     t = re.sub(r'\\times', '×', t)
     t = re.sub(r'\\div', '÷', t)
     t = re.sub(r'\\pm', '±', t)
-    t = re.sub(r'\\leq', '≤', t)
-    t = re.sub(r'\\geq', '≥', t)
-    t = re.sub(r'\\neq', '≠', t)
+    t = re.sub(r'\\mp', '∓', t)
     t = re.sub(r'\\pi', 'π', t)
     t = re.sub(r'\\alpha', 'α', t)
     t = re.sub(r'\\beta', 'β', t)
     t = re.sub(r'\\gamma', 'γ', t)
     t = re.sub(r'\\theta', 'θ', t)
+    t = re.sub(r'\\lambda', 'λ', t)
+    t = re.sub(r'\\mu', 'μ', t)
+    t = re.sub(r'\\sigma', 'σ', t)
+    t = re.sub(r'\\infty', '∞', t)
+    t = re.sub(r'\\leftarrow', '←', t)
+    t = re.sub(r'\\rightarrow', '→', t)
+    t = re.sub(r'\\Rightarrow', '⇒', t)
 
     # Superscripts and subscripts - preserve the content
-    t = re.sub(r'\^{([^}]*)}', r'^\1', t)
-    t = re.sub(r'_{([^}]*)}', r'_\1', t)
+    t = re.sub(r'\^\s*\{\s*([^}]*)\s*\}', r'^\1', t)
+    t = re.sub(r'_\s*\{\s*([^}]*)\s*\}', r'_\1', t)
 
     # Remove any remaining LaTeX commands (but keep the content if wrapped in braces)
-    t = re.sub(r'\\([a-zA-Z]+)\{([^}]*)\}', r'\2', t)  # \cmd{text} -> text
-    t = re.sub(r'\\[a-zA-Z]+\s*', '', t)  # Remove remaining commands
+    # This handles \cmd{text} -> text pattern
+    t = re.sub(r'\\([a-zA-Z]+)\s*\{\s*([^}]*)\s*\}', r'\2', t)
 
-    # Remove braces
-    t = re.sub(r'[{}]', '', t)
+    # Remove remaining bare LaTeX commands
+    t = re.sub(r'\\[a-zA-Z]+\s*', '', t)
+
+    # Remove any remaining braces and brackets that aren't part of content
+    t = re.sub(r'[\{\}]', '', t)
 
     # Clean up whitespace
     t = re.sub(r'\n{3,}', '\n\n', t)  # Max 2 consecutive newlines
-    t = re.sub(r' {2,}', ' ', t)  # Single space between words
+    t = re.sub(r'[ \t]{2,}', ' ', t)  # Single space between words
+    t = re.sub(r'\s*\|\s*', ' | ', t)  # Clean up table column separators
 
     return t.strip()
 
