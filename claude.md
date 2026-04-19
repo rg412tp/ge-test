@@ -466,3 +466,4 @@ curl http://187.124.54.5:9001/api/health
 2026-04-19 - Full codebase analysis completed
 2026-04-19 - Fixed environment configuration and added docker-compose.test.yml
 2026-04-19 - Analyzed secret storage flow: Production (working) vs Test (broken)
+2026-04-19 - Fixed text extraction quality: removed URLs, LaTeX font commands, strikethrough, extra backslashes

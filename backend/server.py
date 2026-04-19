@@ -521,12 +521,16 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
         current_images = []
     
     for line in lines:
-        # Check for images first
+        # Check for images first (and extract URLs without adding the markdown to text)
         img_match = img_pattern.search(line)
         if img_match:
             current_images.append(img_match.group(2))
+            # Remove the image markdown from the line, keep any text before/after
+            line_without_img = img_pattern.sub('', line).strip()
+            if line_without_img and current_q is not None:
+                current_text.append(line_without_img)
             continue
-        
+
         # Check for question number
         stripped = line.strip()
         q_match = q_pattern.match(stripped)
@@ -537,7 +541,7 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
             rest = stripped[q_match.end():].strip()
             current_text = [rest] if rest else []
             continue
-        
+
         # Check for part
         part_match = part_pattern.match(stripped)
         if part_match and current_q:
@@ -546,35 +550,74 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
             rest = stripped[part_match.end():].strip()
             current_text = [rest] if rest else []
             continue
-        
-        # Regular line
-        if current_q is not None:
+
+        # Regular line - add if we're in a question
+        if current_q is not None and stripped:
             current_text.append(line)
     
     save_current()
     return questions
 
 def clean_text(text: str) -> str:
-    """Clean LaTeX for readable display"""
+    """Clean LaTeX for readable display - removes image URLs, font commands, strikethrough, etc."""
     t = text
+
+    # Remove image URLs (both markdown and plain CDN URLs)
+    t = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', '', t)  # Remove markdown images
+    t = re.sub(r'https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)', '', t)  # Remove image URLs
+
+    # Remove strikethrough formatting (~~text~~)
+    t = re.sub(r'~~([^~]*)~~', r'\1', t)
+
+    # Remove extra backslashes (multiple consecutive backslashes)
+    t = re.sub(r'\\{2,}', ' ', t)  # Double/triple backslashes to single space
+
+    # Remove LaTeX math delimiters
     t = re.sub(r'\\\(|\\\)', '', t)
     t = re.sub(r'\\\[|\\\]', '', t)
+
+    # Handle LaTeX commands that wrap text
     t = re.sub(r'\\text\{([^}]*)\}', r'\1', t)
+    t = re.sub(r'\\mathrm\{([^}]*)\}', r'\1', t)  # \mathrm{m} -> m
+    t = re.sub(r'\\rm\s+([^\s\\}]+)', r'\1', t)  # \rm text -> text
+    t = re.sub(r'\\bf\s+([^\s\\}]+)', r'\1', t)  # Bold: \bf text -> text
+    t = re.sub(r'\\it\s+([^\s\\}]+)', r'\1', t)  # Italic: \it text -> text
+
+    # Handle fractions and roots
     t = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1/\2', t)
     t = re.sub(r'\\sqrt\{([^}]*)\}', r'sqrt(\1)', t)
+
+    # Spacing commands
     t = re.sub(r'\\(quad|qquad|,|;|!)\s*', ' ', t)
-    t = re.sub(r'\\(times)', 'x', t)
-    t = re.sub(r'\\(div)', '÷', t)
-    t = re.sub(r'\\(pm)', '±', t)
-    t = re.sub(r'\\(leq)', '≤', t)
-    t = re.sub(r'\\(geq)', '≥', t)
-    t = re.sub(r'\\(neq)', '≠', t)
-    t = re.sub(r'\\(pi)', 'π', t)
+
+    # Math symbols
+    t = re.sub(r'\\times', '×', t)
+    t = re.sub(r'\\div', '÷', t)
+    t = re.sub(r'\\pm', '±', t)
+    t = re.sub(r'\\leq', '≤', t)
+    t = re.sub(r'\\geq', '≥', t)
+    t = re.sub(r'\\neq', '≠', t)
+    t = re.sub(r'\\pi', 'π', t)
+    t = re.sub(r'\\alpha', 'α', t)
+    t = re.sub(r'\\beta', 'β', t)
+    t = re.sub(r'\\gamma', 'γ', t)
+    t = re.sub(r'\\theta', 'θ', t)
+
+    # Superscripts and subscripts - preserve the content
     t = re.sub(r'\^{([^}]*)}', r'^\1', t)
     t = re.sub(r'_{([^}]*)}', r'_\1', t)
-    t = re.sub(r'\\[a-zA-Z]+', '', t)
+
+    # Remove any remaining LaTeX commands (but keep the content if wrapped in braces)
+    t = re.sub(r'\\([a-zA-Z]+)\{([^}]*)\}', r'\2', t)  # \cmd{text} -> text
+    t = re.sub(r'\\[a-zA-Z]+\s*', '', t)  # Remove remaining commands
+
+    # Remove braces
     t = re.sub(r'[{}]', '', t)
-    t = re.sub(r'\n{3,}', '\n\n', t)
+
+    # Clean up whitespace
+    t = re.sub(r'\n{3,}', '\n\n', t)  # Max 2 consecutive newlines
+    t = re.sub(r' {2,}', ' ', t)  # Single space between words
+
     return t.strip()
 
 async def classify_and_structure_with_gemini(mmd_content: str, paper_id: str) -> list:
