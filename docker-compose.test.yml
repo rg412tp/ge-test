@@ -1,0 +1,50 @@
+# Test Environment Docker Compose
+# Usage: docker-compose -f docker-compose.test.yml up -d
+# Or: docker-compose -p ge-test -f docker-compose.test.yml up -d
+
+services:
+  backend:
+    build: ./backend
+    container_name: ge-test-backend
+    restart: always
+    env_file:
+      - ./backend/.env.production
+    expose:
+      - "8001"
+    depends_on:
+      - mongo
+    volumes:
+      - upload_data:/app/uploads
+    ports:
+      - "9001:8001"
+    environment:
+      # Override for test environment
+      - ENVIRONMENT=test
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_BACKEND_URL: http://187.124.54.5:9001
+    container_name: ge-test-frontend
+    restart: always
+    ports:
+      - "9000:80"
+    depends_on:
+      - backend
+
+  mongo:
+    image: mongo:7
+    container_name: ge-test-mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27018:27017"
+
+volumes:
+  mongo_data:
+  upload_data:
