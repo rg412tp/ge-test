@@ -462,8 +462,40 @@ curl http://187.124.54.5:9001/api/health
 
 ---
 
+## Docker Service Naming - MongoDB Connection Fix ✅ FIXED
+
+### The Issue
+Frontend was stuck loading indefinitely after recent text extraction fixes. Root cause:
+- Docker-compose service name: `mongo`
+- MONGO_URL in .env.production: `mongodb://...@mongo-test:27017`
+- Result: Backend couldn't resolve `mongo-test` hostname, connection timed out, frontend hung
+
+### The Fix (2026-04-19 20:57 UTC)
+Changed `MONGO_URL` from:
+```
+mongodb://admin:PASSWORD@mongo-test:27017
+```
+
+To:
+```
+mongodb://admin:PASSWORD@mongo:27017
+```
+
+Rebuilt all containers and verified:
+- ✅ Backend connects successfully to MongoDB
+- ✅ /api/papers endpoint responds
+- ✅ /api/stats endpoint responds  
+- ✅ /api/topics/categories endpoint responds
+- ✅ Frontend should now load without hanging
+
+### Key Lesson
+Docker service names in docker-compose must match the hostnames in connection strings. When services are in the same network, they're accessible via their service name as hostname.
+
+---
+
 ## Last Updated
 2026-04-19 - Full codebase analysis completed
 2026-04-19 - Fixed environment configuration and added docker-compose.test.yml
 2026-04-19 - Analyzed secret storage flow: Production (working) vs Test (broken)
 2026-04-19 - Fixed text extraction quality: removed URLs, LaTeX font commands, strikethrough, extra backslashes
+2026-04-19 - FIXED: MongoDB hostname mismatch (mongo-test → mongo) - frontend loading issue resolved
