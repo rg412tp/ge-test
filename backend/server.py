@@ -536,12 +536,14 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
 
         # Check for question number
         stripped = line.strip()
-        q_match = q_pattern.match(stripped)
+        # Clean LaTeX math delimiters to expose question numbers
+        stripped_for_q = re.sub(r'\\[\[(]', '', stripped)  # Remove \( or \[
+        q_match = q_pattern.match(stripped_for_q)
         if q_match and not stripped.startswith('('):
             save_current()
             current_q = int(q_match.group(1))
             current_part = None
-            rest = stripped[q_match.end():].strip()
+            rest = stripped_for_q[q_match.end():].strip()
             current_text = [rest] if rest else []
             continue
 
