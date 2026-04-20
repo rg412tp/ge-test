@@ -681,10 +681,12 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
   const [markSchemeEntries, setMarkSchemeEntries] = useState([]);
   const [updating, setUpdating] = useState(false);
   const [showMarkScheme, setShowMarkScheme] = useState(false);
+  const [showSolution, setShowSolution] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [editText, setEditText] = useState("");
   const [editMarks, setEditMarks] = useState("");
   const [editParts, setEditParts] = useState([]);
+  const [editSolution, setEditSolution] = useState("");
 
   useEffect(() => {
     if (question?.images?.length > 0) {
@@ -768,6 +770,7 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
       const updates = { text: editText };
       if (editMarks) updates.marks = parseInt(editMarks);
       if (editParts.length > 0) updates.parts = editParts;
+      if (editSolution) updates.solution = editSolution;
       await axios.patch(`${API}/questions/${question.id}`, updates);
       toast.success("Question updated!");
       setEditMode(false);
@@ -843,6 +846,14 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
           >
             <ListChecks size={14} />
             MS
+          </button>
+          <button
+            data-testid="toggle-solution-btn"
+            onClick={() => setShowSolution(!showSolution)}
+            className={`px-3 py-2 border border-black text-xs flex items-center gap-1 ${showSolution ? "bg-purple-50" : ""}`}
+          >
+            <LightbulbFilament size={14} />
+            Solution
           </button>
           <button
             data-testid="approve-question-btn"
@@ -1043,7 +1054,28 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
             <MarkSchemePanel question={question} entries={markSchemeEntries} />
           </div>
         )}
-        
+
+        {/* Solution Panel */}
+        {showSolution && (
+          <div className="mb-4 border border-purple-300 p-4 bg-purple-50">
+            <label className="text-xs tracking-widest uppercase font-bold block mb-3">Solution</label>
+            {editMode ? (
+              <textarea
+                value={editSolution || question.solution || ""}
+                onChange={(e) => setEditSolution(e.target.value)}
+                placeholder="Solution (optional)"
+                className="w-full border border-black p-2 font-mono text-xs min-h-32"
+              />
+            ) : question.solution ? (
+              <div className="prose prose-sm max-w-none">
+                {renderLatex(question.solution, question.solution_latex)}
+              </div>
+            ) : (
+              <p className="text-slate-500 text-xs italic">No solution yet. Click "Solutions" button to generate.</p>
+            )}
+          </div>
+        )}
+
         {/* Metadata */}
         <div className="grid grid-cols-3 gap-3">
           <div className="border border-black p-3">
@@ -1327,6 +1359,52 @@ const Dashboard = () => {
                       className="text-xs px-2 py-1 border border-amber-600 text-amber-700 hover:bg-amber-50"
                     >
                       Re-Extract
+                    </button>
+                  )}
+                  {selectedPaper.status === "extracted" && (
+                    <button
+                      data-testid="classify-btn"
+                      onClick={async () => {
+                        try {
+                          setUpdating(true);
+                          const res = await axios.post(`${API}/papers/${selectedPaper.id}/classify`);
+                          toast.success(`Classified ${res.data.classified}/${res.data.total} questions`);
+                          // Reload questions
+                          const q = await axios.get(`${API}/questions?paper_id=${selectedPaper.id}`);
+                          setQuestions(q.data);
+                        } catch (error) {
+                          toast.error("Classification failed: " + (error.response?.data?.detail || error.message));
+                        } finally {
+                          setUpdating(false);
+                        }
+                      }}
+                      disabled={updating}
+                      className="text-xs px-2 py-1 border border-blue-600 text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                    >
+                      Classify
+                    </button>
+                  )}
+                  {selectedPaper.status === "extracted" && (
+                    <button
+                      data-testid="solutions-btn"
+                      onClick={async () => {
+                        try {
+                          setUpdating(true);
+                          const res = await axios.post(`${API}/papers/${selectedPaper.id}/generate-solutions`);
+                          toast.success(`Generated ${res.data.generated}/${res.data.total} solutions`);
+                          // Reload questions
+                          const q = await axios.get(`${API}/questions?paper_id=${selectedPaper.id}`);
+                          setQuestions(q.data);
+                        } catch (error) {
+                          toast.error("Solution generation failed: " + (error.response?.data?.detail || error.message));
+                        } finally {
+                          setUpdating(false);
+                        }
+                      }}
+                      disabled={updating}
+                      className="text-xs px-2 py-1 border border-purple-600 text-purple-700 hover:bg-purple-50 disabled:opacity-50"
+                    >
+                      Solutions
                     </button>
                   )}
                   <button
