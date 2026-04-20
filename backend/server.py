@@ -1111,6 +1111,8 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
 
         # SKIP Gemini - parse with regex only (immediate extraction without classification)
         logger.info("Parsing questions with regex (no Gemini - questions available immediately)")
+        # Debug: log first 3000 chars of markdown to diagnose parsing
+        logger.info(f"Mathpix markdown (first 3000 chars):\n{mmd_content[:3000]}")
         structured_questions = parse_mathpix_mmd(mmd_content)
         logger.info(f"Parsing done: {len(structured_questions)} questions (classification optional later)")
 
