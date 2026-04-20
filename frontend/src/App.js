@@ -689,56 +689,53 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
   const [editSolution, setEditSolution] = useState("");
 
   useEffect(() => {
-    // Populate edit fields immediately (no async)
-    if (question) {
-      setEditText(question.text || "");
-      setEditMarks(question.marks?.toString() || "");
-      setEditParts(question.parts?.map(p => ({ ...p })) || []);
-      setEditSolution(question.solution || "");
+    if (!question) {
       setImages([]);
       setMarkSchemeEntries([]);
+      return;
     }
-  }, [question?.id]);
 
-  // Load images asynchronously (non-blocking)
-  useEffect(() => {
-    if (!question?.images?.length) return;
+    // Populate edit fields immediately
+    setEditText(question.text || "");
+    setEditMarks(question.marks?.toString() || "");
+    setEditParts(question.parts?.map(p => ({ ...p })) || []);
+    setEditSolution(question.solution || "");
 
     let mounted = true;
-    let imageCount = 0;
 
-    // Load images one at a time with timeout
+    // Load resources asynchronously (non-blocking)
     (async () => {
-      const loadedImages = [];
-      for (const imgId of question.images) {
-        if (!mounted) break;
+      // Load images one at a time with timeout
+      if (question.images?.length > 0) {
+        const loadedImages = [];
+        for (const imgId of question.images) {
+          if (!mounted) break;
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 3000);
+            const response = await axios.get(`${API}/images/${imgId}`, { signal: controller.signal });
+            clearTimeout(timeout);
+            loadedImages.push(response.data);
+            if (mounted) setImages([...loadedImages]);
+          } catch {
+            // Skip failed images
+          }
+        }
+      }
+
+      // Load mark scheme
+      if (question.id && mounted) {
         try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 3000);
-          const response = await axios.get(`${API}/images/${imgId}`, { signal: controller.signal });
-          clearTimeout(timeout);
-          loadedImages.push(response.data);
-          if (mounted) setImages([...loadedImages]);
+          const res = await axios.get(`${API}/questions/${question.id}/mark-scheme`);
+          if (mounted) setMarkSchemeEntries(res.data || []);
         } catch {
-          // Skip failed images
+          if (mounted) setMarkSchemeEntries([]);
         }
       }
     })();
 
     return () => { mounted = false; };
-  }, [question?.images]);
-
-  // Load mark scheme asynchronously (non-blocking)
-  useEffect(() => {
-    if (!question?.id) return;
-
-    let mounted = true;
-    axios.get(`${API}/questions/${question.id}/mark-scheme`)
-      .then(res => { if (mounted) setMarkSchemeEntries(res.data || []); })
-      .catch(() => { if (mounted) setMarkSchemeEntries([]); });
-
-    return () => { mounted = false; };
-  }, [question?.id]);
+  }, [question]);
 
   const handleApprove = async () => {
     setUpdating(true);
