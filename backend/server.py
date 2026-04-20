@@ -294,6 +294,7 @@ class ExtractionJob(BaseModel):
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     api_calls: int = 0  # Track number of AI calls
+    mathpix_output: Optional[str] = None  # Cache Mathpix markdown to avoid re-extracting on Gemini retry
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 # ============ Cost Tracking ============
@@ -999,46 +1000,59 @@ async def re_extract_paper(paper_id: str):
     # Create new extraction job
     job = ExtractionJob(paper_id=paper_id)
     await db.extraction_jobs.insert_one(job.model_dump())
-    
-    # Start extraction
-    asyncio.create_task(process_pdf_extraction(paper_id, pdf_content, job.id))
-    
+
+    # Check if we have cached Mathpix output from a previous attempt
+    last_job = await db.extraction_jobs.find_one(
+        {"paper_id": paper_id, "id": {"$ne": job.id}},
+        sort=[("created_at", -1)]
+    )
+
+    if last_job and last_job.get("mathpix_output"):
+        # Mathpix already done - just retry Gemini
+        logger.info(f"Reusing cached Mathpix output ({len(last_job['mathpix_output'])} chars)")
+        asyncio.create_task(process_gemini_only(paper_id, last_job["mathpix_output"], job.id))
+    else:
+        # No cached output - do full extraction (Mathpix + Gemini)
+        asyncio.create_task(process_pdf_extraction(paper_id, pdf_content, job.id))
+
     return {"message": "Re-extraction started", "job_id": job.id, "paper_id": paper_id}
 
 async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str):
-    """Mathpix gets raw content. Gemini structures it. 2 API calls total."""
+    """Mathpix gets raw content once. Gemini structures it with retries. Caches Mathpix output to avoid re-extracting on Gemini retry."""
     try:
         await db.extraction_jobs.update_one(
             {"id": job_id},
             {"$set": {"status": "processing", "started_at": datetime.now(timezone.utc).isoformat()}}
         )
-        
+
         paper = await db.papers.find_one({"id": paper_id}, {"_id": 0})
         ge_code = paper.get("ge_code") or generate_ge_code(
             paper.get('exam_year', 0), paper.get('board', 'AQA'), paper.get('paper_number', '1')
         )
-        
+
         pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
         total_pages = len(pdf_document)
         pdf_document.close()
-        
+
         await db.extraction_jobs.update_one(
             {"id": job_id}, {"$set": {"total_pages": total_pages, "processed_pages": 1}}
         )
-        
-        # CALL 1: Mathpix - raw extraction
+
+        # CALL 1: Mathpix - raw extraction (ONLY ONCE per extraction attempt)
         logger.info(f"Mathpix: submitting {total_pages} pages")
         await log_api_call(paper_id, "mathpix_pdf")
         mathpix_pdf_id = mathpix_submit_pdf(pdf_content)
         mathpix_poll_status(mathpix_pdf_id)
         mmd_content = mathpix_get_mmd(mathpix_pdf_id)
         logger.info(f"Mathpix done: {len(mmd_content)} chars")
-        
+
+        # Cache Mathpix output in extraction job for potential re-use on Gemini retry
         await db.extraction_jobs.update_one(
-            {"id": job_id}, {"$set": {"processed_pages": total_pages // 2}}
+            {"id": job_id},
+            {"$set": {"mathpix_output": mmd_content, "processed_pages": total_pages // 2}}
         )
-        
-        # CALL 2: Gemini - structure + classify in one call
+
+        # CALL 2: Gemini - structure + classify in one call (with internal retry logic)
         logger.info("Gemini: structuring questions")
         structured_questions = await classify_and_structure_with_gemini(mmd_content, paper_id)
         logger.info(f"Gemini done: {len(structured_questions)} questions")
@@ -1123,6 +1137,112 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
         
     except Exception as e:
         logger.error(f"Extraction failed: {e}")
+        await db.extraction_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "failed", "error_message": str(e),
+                      "completed_at": datetime.now(timezone.utc).isoformat()}}
+        )
+        await db.papers.update_one({"id": paper_id}, {"$set": {"status": "failed"}})
+
+
+async def process_gemini_only(paper_id: str, mmd_content: str, job_id: str):
+    """Retry Gemini structuring ONLY - reuses cached Mathpix output. Avoids wasting API tokens."""
+    try:
+        await db.extraction_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "processing", "started_at": datetime.now(timezone.utc).isoformat()}}
+        )
+
+        paper = await db.papers.find_one({"id": paper_id}, {"_id": 0})
+        ge_code = paper.get("ge_code") or generate_ge_code(
+            paper.get('exam_year', 0), paper.get('board', 'AQA'), paper.get('paper_number', '1')
+        )
+
+        # SKIP Mathpix entirely - use cached output
+        logger.info(f"Gemini (retry): structuring questions from cached Mathpix output ({len(mmd_content)} chars)")
+        structured_questions = await classify_and_structure_with_gemini(mmd_content, paper_id)
+        logger.info(f"Gemini done: {len(structured_questions)} questions")
+
+        # Save to database (same as full extraction)
+        all_questions = []
+        images_extracted = 0
+
+        for q_data in structured_questions:
+            q_number = q_data.get("question_number", 0)
+            if q_number <= 0:
+                continue
+            ge_question_id = generate_ge_question_id(ge_code, q_number)
+
+            # Download Mathpix images
+            image_ids = []
+            for img_url in q_data.get("image_urls", []):
+                try:
+                    img_bytes = download_image(img_url)
+                    img_id = str(uuid.uuid4())
+                    img_path = f"{APP_NAME}/images/{paper_id}/{img_id}.png"
+                    put_object(img_path, img_bytes, "image/png")
+                    img_asset = ImageAsset(
+                        id=img_id, paper_id=paper_id, storage_path=img_path,
+                        original_filename=f"Q{q_number}.png", content_type="image/png",
+                        width=0, height=0, page_number=0,
+                        description=f"Diagram Q{q_number}"
+                    )
+                    await db.image_assets.insert_one(img_asset.model_dump())
+                    image_ids.append(img_id)
+                    images_extracted += 1
+                except Exception as e:
+                    logger.error(f"Image download error: {e}")
+
+            # Build parts (skip parts without valid part_label)
+            parts = []
+            for p in q_data.get("parts", []):
+                pl = p.get("part_label") or ""
+                if not pl or not pl.strip():
+                    logger.debug(f"Skipping part without label in Q{q_number}")
+                    continue
+
+                part_text = p.get("text", "").strip()
+                if not part_text:
+                    logger.debug(f"Skipping part {pl} in Q{q_number} - no text")
+                    continue
+
+                ge_part_id = generate_ge_part_id(ge_question_id, pl)
+                parts.append(QuestionPart(
+                    part_label=pl.strip(), text=clean_text(part_text),
+                    latex=p.get("latex"), marks=p.get("marks"),
+                    confidence=0.95, ge_id=ge_part_id, images=image_ids
+                ))
+
+            question = Question(
+                question_number=q_number, text=clean_text(q_data.get("text", "")),
+                latex=q_data.get("latex"), parts=parts, marks=q_data.get("marks", 0),
+                has_diagram=q_data.get("has_diagram", False),
+                has_table=q_data.get("has_table", False),
+                image_ids=image_ids, difficulty=q_data.get("difficulty"),
+                topics=q_data.get("topics", []), paper_id=paper_id, ge_id=ge_question_id
+            )
+            await db.questions.insert_one(question.model_dump())
+            all_questions.append(question)
+
+        # Update paper and job
+        await db.papers.update_one(
+            {"id": paper_id},
+            {"$set": {"status": "extracted", "total_questions": len(all_questions)}}
+        )
+
+        await db.extraction_jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "completed", "questions_found": len(all_questions),
+                "images_extracted": images_extracted, "api_calls": 1,
+                "completed_at": datetime.now(timezone.utc).isoformat()
+            }}
+        )
+
+        logger.info(f"Done: {len(all_questions)} questions, {images_extracted} images (cached Mathpix + Gemini retry)")
+
+    except Exception as e:
+        logger.error(f"Gemini retry failed: {e}")
         await db.extraction_jobs.update_one(
             {"id": job_id},
             {"$set": {"status": "failed", "error_message": str(e),
