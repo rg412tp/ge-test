@@ -689,44 +689,56 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
   const [editSolution, setEditSolution] = useState("");
 
   useEffect(() => {
-    let mounted = true;
-
-    if (question?.images?.length > 0) {
-      Promise.all(
-        question.images.map(async (imgId) => {
-          try {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 5000);
-            const response = await axios.get(`${API}/images/${imgId}`, { signal: controller.signal });
-            clearTimeout(timeout);
-            return response.data;
-          } catch {
-            return null;
-          }
-        })
-      ).then((imgs) => {
-        if (mounted) setImages(imgs.filter(Boolean));
-      });
-    } else {
-      setImages([]);
-    }
-
-    if (question?.id) {
-      axios.get(`${API}/questions/${question.id}/mark-scheme`)
-        .then(res => { if (mounted) setMarkSchemeEntries(res.data); })
-        .catch(() => { if (mounted) setMarkSchemeEntries([]); });
-    }
-
-    // Populate edit fields
+    // Populate edit fields immediately (no async)
     if (question) {
       setEditText(question.text || "");
       setEditMarks(question.marks?.toString() || "");
       setEditParts(question.parts?.map(p => ({ ...p })) || []);
       setEditSolution(question.solution || "");
+      setImages([]);
+      setMarkSchemeEntries([]);
     }
+  }, [question?.id]);
+
+  // Load images asynchronously (non-blocking)
+  useEffect(() => {
+    if (!question?.images?.length) return;
+
+    let mounted = true;
+    let imageCount = 0;
+
+    // Load images one at a time with timeout
+    (async () => {
+      const loadedImages = [];
+      for (const imgId of question.images) {
+        if (!mounted) break;
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 3000);
+          const response = await axios.get(`${API}/images/${imgId}`, { signal: controller.signal });
+          clearTimeout(timeout);
+          loadedImages.push(response.data);
+          if (mounted) setImages([...loadedImages]);
+        } catch {
+          // Skip failed images
+        }
+      }
+    })();
 
     return () => { mounted = false; };
-  }, [question]);
+  }, [question?.images]);
+
+  // Load mark scheme asynchronously (non-blocking)
+  useEffect(() => {
+    if (!question?.id) return;
+
+    let mounted = true;
+    axios.get(`${API}/questions/${question.id}/mark-scheme`)
+      .then(res => { if (mounted) setMarkSchemeEntries(res.data || []); })
+      .catch(() => { if (mounted) setMarkSchemeEntries([]); });
+
+    return () => { mounted = false; };
+  }, [question?.id]);
 
   const handleApprove = async () => {
     setUpdating(true);
