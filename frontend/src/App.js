@@ -1210,11 +1210,14 @@ const Dashboard = () => {
   const [papers, setPapers] = useState([]);
   const [selectedPaper, setSelectedPaper] = useState(null);
   const [questions, setQuestions] = useState([]);
-  const [selectedQuestion, setSelectedQuestion] = useState(null);
+  const [selectedQuestionId, setSelectedQuestionId] = useState(null);
   const [extractionJobId, setExtractionJobId] = useState(null);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [allTopics, setAllTopics] = useState({});
+
+  // Get selected question object from questions array by ID
+  const selectedQuestion = questions.find(q => q.id === selectedQuestionId) || null;
 
   const fetchData = useCallback(async () => {
     try {
@@ -1259,7 +1262,7 @@ const Dashboard = () => {
 
   const handlePaperSelect = (paper) => {
     setSelectedPaper(paper);
-    setSelectedQuestion(null);
+    setSelectedQuestionId(null);
     setQuestions([]);
   };
 
@@ -1270,7 +1273,7 @@ const Dashboard = () => {
       toast.success("Paper deleted");
       if (selectedPaper?.id === paperId) {
         setSelectedPaper(null);
-        setSelectedQuestion(null);
+        setSelectedQuestionId(null);
         setQuestions([]);
       }
       fetchData();
@@ -1294,12 +1297,6 @@ const Dashboard = () => {
   const handleQuestionUpdate = () => {
     if (selectedPaper) {
       fetchQuestions(selectedPaper.id);
-    }
-    // Refresh selected question
-    if (selectedQuestion) {
-      axios.get(`${API}/questions/${selectedQuestion.id}`)
-        .then(res => setSelectedQuestion(res.data))
-        .catch(() => {});
     }
     fetchData();
   };
@@ -1464,8 +1461,8 @@ const Dashboard = () => {
               <div className="flex-1 overflow-hidden">
                 <QuestionList
                   questions={questions}
-                  selectedId={selectedQuestion?.id}
-                  onSelect={setSelectedQuestion}
+                  selectedId={selectedQuestionId}
+                  onSelect={(q) => setSelectedQuestionId(q.id)}
                 />
               </div>
             </>
