@@ -187,6 +187,8 @@ class Question(BaseModel):
     mark_scheme: Optional[str] = None  # Overall mark scheme text
     mark_scheme_latex: Optional[str] = None
     mark_scheme_id: Optional[str] = None  # Link to mark scheme document
+    solution: Optional[str] = None  # AI-generated or manual solution text
+    solution_latex: Optional[str] = None  # Solution with LaTeX formatting
     ge_id: Optional[str] = None  # e.g., GE-2017-P1-Q01 (parent)
     parent_ge_id: Optional[str] = None  # Parent GE ID for hierarchy
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -722,6 +724,61 @@ MATHPIX CONTENT:
                 return []
 
 
+async def classify_questions_with_gemini(questions: List[Dict[str, Any]], paper_id: str) -> Dict[int, Dict[str, Any]]:
+    """Classify existing questions with topics and difficulty (lightweight version)"""
+    if not questions:
+        return {}
+
+    client = _init_gemini_client()
+
+    # Batch questions into groups to avoid context limit
+    question_summaries = []
+    for q in questions:
+        parts_summary = "; ".join([f"{p.get('part_label')}: {p.get('text', '')[:50]}" for p in q.get('parts', [])])
+        summary = f"Q{q.get('question_number')}: {q.get('text', '')[:100]}. Parts: {parts_summary}"
+        question_summaries.append(summary)
+
+    content = "GCSE Questions to classify:\n\n" + "\n".join(question_summaries)
+
+    prompt = f"""Classify these GCSE Maths questions by topic and difficulty.
+Return JSON with question_number as key:
+{{
+  "1": {{"difficulty": "bronze", "topics": ["number-operations", "fractions"]}},
+  "2": {{"difficulty": "silver", "topics": ["algebra", "quadratics"]}}
+}}
+
+Topics: number-operations, fractions, ratio-proportion, percentages, indices, standard-form, surds, algebraic-expressions, linear-equations, quadratics, factorisation, simultaneous-equations, inequalities, sequences, functions, angles, triangles, circles, area-perimeter, volume-surface-area, trigonometry, pythagoras, transformations, vectors, coordinates, probability, data-handling, averages, cumulative-frequency, histograms
+
+Difficulty: bronze (basic), silver (intermediate), gold (advanced)
+
+{content}"""
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+            )
+            await log_api_call(paper_id, "gemini_classify")
+            result = _parse_json_response(response.text)
+            # Convert string keys to int
+            return {int(k): v for k, v in result.items() if k.isdigit() or k.lstrip('-').isdigit()}
+        except Exception as e:
+            error_str = str(e)
+            is_503 = "503" in error_str or "UNAVAILABLE" in error_str
+            is_last_attempt = (attempt == max_retries - 1)
+
+            if is_503 and not is_last_attempt:
+                wait_time = 2 ** attempt
+                logger.info(f"Gemini 503 error on classify (attempt {attempt+1}/{max_retries}), retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Gemini classification error (attempt {attempt+1}/{max_retries}): {e}")
+                return {}
+
+
 async def extract_mark_scheme_from_page(page_image_base64: str, page_number: int, mark_scheme_id: str) -> Dict[str, Any]:
     """Use Gemini Flash to extract mark scheme entries"""
     try:
@@ -1052,11 +1109,11 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
             {"$set": {"mathpix_output": mmd_content, "processed_pages": total_pages // 2}}
         )
 
-        # CALL 2: Gemini - structure + classify in one call (with internal retry logic)
-        logger.info("Gemini: structuring questions")
-        structured_questions = await classify_and_structure_with_gemini(mmd_content, paper_id)
-        logger.info(f"Gemini done: {len(structured_questions)} questions")
-        
+        # SKIP Gemini - parse with regex only (immediate extraction without classification)
+        logger.info("Parsing questions with regex (no Gemini - questions available immediately)")
+        structured_questions = parse_mathpix_mmd(mmd_content)
+        logger.info(f"Parsing done: {len(structured_questions)} questions (classification optional later)")
+
         await db.extraction_jobs.update_one(
             {"id": job_id}, {"$set": {"processed_pages": total_pages - 1}}
         )
@@ -1218,7 +1275,7 @@ async def process_gemini_only(paper_id: str, mmd_content: str, job_id: str):
                 latex=q_data.get("latex"), parts=parts, marks=q_data.get("marks", 0),
                 has_diagram=q_data.get("has_diagram", False),
                 has_table=q_data.get("has_table", False),
-                image_ids=image_ids, difficulty=q_data.get("difficulty"),
+                images=image_ids, difficulty=q_data.get("difficulty"),
                 topics=q_data.get("topics", []), paper_id=paper_id, ge_id=ge_question_id
             )
             await db.questions.insert_one(question.model_dump())
@@ -1249,6 +1306,96 @@ async def process_gemini_only(paper_id: str, mmd_content: str, job_id: str):
                       "completed_at": datetime.now(timezone.utc).isoformat()}}
         )
         await db.papers.update_one({"id": paper_id}, {"$set": {"status": "failed"}})
+
+# Classification endpoint (manual trigger to classify existing questions)
+@api_router.post("/papers/{paper_id}/classify")
+async def classify_paper_questions(paper_id: str):
+    """Classify existing questions with topics and difficulty"""
+    paper = await db.papers.find_one({"id": paper_id}, {"_id": 0})
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    questions = await db.questions.find({"paper_id": paper_id}, {"_id": 0}).to_list(None)
+    if not questions:
+        return {"message": "No questions to classify", "classified": 0}
+
+    logger.info(f"Classifying {len(questions)} questions for paper {paper_id}")
+    classifications = await classify_questions_with_gemini(questions, paper_id)
+    logger.info(f"Gemini returned classifications for {len(classifications)} questions")
+
+    classified_count = 0
+    for q_num, classification in classifications.items():
+        try:
+            result = await db.questions.update_one(
+                {"paper_id": paper_id, "question_number": q_num},
+                {"$set": {
+                    "difficulty": classification.get("difficulty"),
+                    "topics": classification.get("topics", [])
+                }}
+            )
+            if result.modified_count > 0:
+                classified_count += 1
+        except Exception as e:
+            logger.error(f"Failed to update Q{q_num}: {e}")
+
+    logger.info(f"Successfully classified {classified_count}/{len(questions)} questions")
+    return {"message": "Classification complete", "classified": classified_count, "total": len(questions)}
+
+
+# Solution generation endpoint
+@api_router.post("/papers/{paper_id}/generate-solutions")
+async def generate_paper_solutions(paper_id: str):
+    """Generate solutions for all questions using linked mark schemes"""
+    paper = await db.papers.find_one({"id": paper_id}, {"_id": 0})
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    questions = await db.questions.find({"paper_id": paper_id}, {"_id": 0}).to_list(None)
+    if not questions:
+        return {"message": "No questions to generate solutions for", "generated": 0}
+
+    client = _init_gemini_client()
+    generated_count = 0
+
+    for question in questions:
+        try:
+            q_num = question.get("question_number")
+            mark_scheme = question.get("mark_scheme") or ""
+            question_text = question.get("text", "")
+
+            if not question_text:
+                continue
+
+            prompt = f"""Generate a detailed step-by-step solution for this GCSE maths question.
+
+Question: {question_text}
+
+Mark scheme reference:
+{mark_scheme}
+
+Provide a clear, concise solution with working and explanation that matches the marks available."""
+
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+            )
+            await log_api_call(paper_id, "solution_generation")
+
+            solution_text = response.text if response else ""
+
+            result = await db.questions.update_one(
+                {"id": question.get("id")},
+                {"$set": {"solution": solution_text, "solution_latex": solution_text}}
+            )
+            if result.modified_count > 0:
+                generated_count += 1
+
+            logger.info(f"Generated solution for Q{q_num}")
+        except Exception as e:
+            logger.error(f"Failed to generate solution for Q{q_num}: {e}")
+
+    logger.info(f"Generated {generated_count}/{len(questions)} solutions")
+    return {"message": "Solution generation complete", "generated": generated_count, "total": len(questions)}
 
 # Extraction job status
 @api_router.get("/extraction-jobs/{job_id}")
@@ -1291,7 +1438,7 @@ async def get_question(question_id: str):
 async def update_question(question_id: str, updates: Dict[str, Any]):
     """Update a question (for review/approval workflow)"""
     # Filter allowed update fields
-    allowed_fields = ["text", "latex", "marks", "status", "parts", "review_reason_codes", "difficulty", "topics", "mark_scheme", "mark_scheme_latex"]
+    allowed_fields = ["text", "latex", "marks", "status", "parts", "review_reason_codes", "difficulty", "topics", "mark_scheme", "mark_scheme_latex", "solution", "solution_latex"]
     filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
     
     if not filtered_updates:
