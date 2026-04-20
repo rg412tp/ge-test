@@ -649,13 +649,12 @@ def clean_text(text: str) -> str:
     return t.strip()
 
 async def classify_and_structure_with_gemini(mmd_content: str, paper_id: str) -> list:
-    """ONE Gemini call: takes Mathpix markdown and returns structured questions with classification"""
-    try:
-        client = _init_gemini_client()
-        # Truncate if too long (Gemini context limit)
-        content = mmd_content[:30000] if len(mmd_content) > 30000 else mmd_content
-        
-        prompt = f"""You are parsing a GCSE Maths exam paper. Below is the full content extracted by Mathpix OCR.
+    """ONE Gemini call: takes Mathpix markdown and returns structured questions with classification. Retries on 503."""
+    client = _init_gemini_client()
+    # Truncate if too long (Gemini context limit)
+    content = mmd_content[:30000] if len(mmd_content) > 30000 else mmd_content
+
+    prompt = f"""You are parsing a GCSE Maths exam paper. Below is the full content extracted by Mathpix OCR.
 
 YOUR JOB: Identify each exam question and return structured JSON.
 
@@ -697,16 +696,29 @@ Topics: number-operations, fractions, ratio-proportion, percentages, indices, st
 MATHPIX CONTENT:
 {content}"""
 
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
-        )
-        await log_api_call(paper_id, "gemini_structure_classify")
-        result = _parse_json_response(response.text)
-        return result.get("questions", [])
-    except Exception as e:
-        logger.error(f"Gemini structuring error: {e}")
-        return []
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+            )
+            await log_api_call(paper_id, "gemini_structure_classify")
+            result = _parse_json_response(response.text)
+            return result.get("questions", [])
+        except Exception as e:
+            error_str = str(e)
+            is_503 = "503" in error_str or "UNAVAILABLE" in error_str
+            is_last_attempt = (attempt == max_retries - 1)
+
+            if is_503 and not is_last_attempt:
+                wait_time = 2 ** attempt
+                logger.info(f"Gemini 503 error (attempt {attempt+1}/{max_retries}), retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Gemini structuring error (attempt {attempt+1}/{max_retries}): {e}")
+                return []
 
 
 async def extract_mark_scheme_from_page(page_image_base64: str, page_number: int, mark_scheme_id: str) -> Dict[str, Any]:
