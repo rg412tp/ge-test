@@ -689,25 +689,32 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
   const [editSolution, setEditSolution] = useState("");
 
   useEffect(() => {
+    let mounted = true;
+
     if (question?.images?.length > 0) {
       Promise.all(
         question.images.map(async (imgId) => {
           try {
-            const response = await axios.get(`${API}/images/${imgId}`);
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            const response = await axios.get(`${API}/images/${imgId}`, { signal: controller.signal });
+            clearTimeout(timeout);
             return response.data;
           } catch {
             return null;
           }
         })
-      ).then((imgs) => setImages(imgs.filter(Boolean)));
+      ).then((imgs) => {
+        if (mounted) setImages(imgs.filter(Boolean));
+      });
     } else {
       setImages([]);
     }
 
     if (question?.id) {
       axios.get(`${API}/questions/${question.id}/mark-scheme`)
-        .then(res => setMarkSchemeEntries(res.data))
-        .catch(() => setMarkSchemeEntries([]));
+        .then(res => { if (mounted) setMarkSchemeEntries(res.data); })
+        .catch(() => { if (mounted) setMarkSchemeEntries([]); });
     }
 
     // Populate edit fields
@@ -715,7 +722,10 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
       setEditText(question.text || "");
       setEditMarks(question.marks?.toString() || "");
       setEditParts(question.parts?.map(p => ({ ...p })) || []);
+      setEditSolution(question.solution || "");
     }
+
+    return () => { mounted = false; };
   }, [question]);
 
   const handleApprove = async () => {
