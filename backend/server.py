@@ -467,8 +467,8 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
     current_text = []
     current_images = []
     
-    # Question: "1 ", "**1**", "1.", "1)" at line start
-    q_pattern = re.compile(r'^(?:\*\*)?(\d{1,2})(?:\*\*)?\s*[.)\s]')
+    # Question: "1 ", "**1**", "1.", "1)", "1:", "1-" at line start
+    q_pattern = re.compile(r'^(?:\*\*)?(\d{1,2})(?:\*\*)?(?:\s|[.)\-:])')
     # Part: "(a)", "**(a)**"
     part_pattern = re.compile(r'^(?:\*\*)?\(([a-z])\)(?:\*\*)?\s*')
     # Image: ![...](url)
