@@ -1217,6 +1217,7 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [allTopics, setAllTopics] = useState({});
   const [updating, setUpdating] = useState(false);
+  const [showFullPreview, setShowFullPreview] = useState(false);
 
   // Get selected question object from questions array by ID
   const selectedQuestion = questions.find(q => q.id === selectedQuestionId) || null;
@@ -1425,9 +1426,18 @@ const Dashboard = () => {
                       Solutions
                     </button>
                   )}
+                  {selectedPaper.status === "extracted" && (
+                    <button
+                      data-testid="view-all-btn"
+                      onClick={() => setShowFullPreview(true)}
+                      className="text-xs px-2 py-1 border border-slate-600 text-slate-700 hover:bg-slate-50"
+                    >
+                      View All
+                    </button>
+                  )}
                   <button
                     data-testid="back-to-papers-btn"
-                    onClick={() => { setSelectedPaper(null); setSelectedQuestion(null); setQuestions([]); }}
+                    onClick={() => { setSelectedPaper(null); setSelectedQuestionId(null); setQuestions([]); }}
                     className="text-xs px-2 py-1 border border-black hover:bg-black hover:text-white"
                   >
                     All Papers
@@ -1480,6 +1490,51 @@ const Dashboard = () => {
           />
         </div>
       </div>
+
+      {/* Full Preview Modal */}
+      {showFullPreview && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded border-2 border-black max-w-4xl max-h-[90vh] overflow-auto w-full">
+            <div className="sticky top-0 bg-white border-b border-black p-4 flex items-center justify-between">
+              <h2 className="text-xl font-bold">All Questions - {selectedPaper?.board} P{selectedPaper?.paper_number}</h2>
+              <button
+                onClick={() => setShowFullPreview(false)}
+                className="text-2xl font-bold hover:bg-slate-100 px-3 py-1"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-4">
+              {questions.map((q) => (
+                <div key={q.id} className="mb-6 pb-6 border-b border-slate-300 last:border-b-0">
+                  <div className="flex items-start justify-between mb-2">
+                    <h3 className="font-bold text-lg">Q{q.question_number}</h3>
+                    <div className="flex gap-2">
+                      {q.marks && <span className="text-xs px-2 py-1 bg-slate-100 border border-slate-300">Marks: {q.marks}</span>}
+                      <StatusTag status={q.status} />
+                    </div>
+                  </div>
+                  <div className="text-sm whitespace-pre-wrap mb-2">{renderLatex(q.text, q.latex)}</div>
+                  {q.parts && q.parts.length > 0 && (
+                    <div className="ml-4 mt-2 text-xs">
+                      <strong>Parts:</strong> {q.parts.map((p, i) => `(${p.part_label}) ${p.marks ? p.marks + 'mk' : ''}`).join(', ')}
+                    </div>
+                  )}
+                  {q.topics && q.topics.length > 0 && (
+                    <div className="mt-2">
+                      {q.topics.map((t) => (
+                        <span key={t} className="inline-block text-xs px-2 py-1 border border-slate-400 bg-slate-50 mr-1 mb-1">
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

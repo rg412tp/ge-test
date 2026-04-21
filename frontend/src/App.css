@@ -33,6 +33,29 @@
     display: none;
 }
 
+/* Responsive dual-pane layout */
+.dual-pane {
+    display: flex;
+    overflow: hidden;
+}
+
+.dual-pane > div {
+    display: flex;
+    flex-direction: column;
+}
+
+.dual-pane > div:first-child {
+    width: 40%;
+    min-width: 300px;
+    overflow-y: auto;
+}
+
+.dual-pane > div:last-child {
+    flex: 1;
+    width: 60%;
+    overflow: hidden;
+}
+
 /* Button styles */
 .btn-primary {
     border: 2px solid #16a34a;
