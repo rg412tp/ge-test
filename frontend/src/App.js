@@ -28,7 +28,8 @@ import {
   ListChecks,
   BookOpen,
   CaretDown,
-  Plus
+  Plus,
+  LightbulbFilament
 } from "@phosphor-icons/react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
