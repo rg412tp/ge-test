@@ -11,3 +11,4 @@ google-genai==1.16.1
 mpxpy==0.0.20
 requests==2.32.3
 docling==2.90.0
+pdfplumber==0.11.5

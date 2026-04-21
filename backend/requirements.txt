@@ -124,3 +124,4 @@ websockets==16.0
 yarl==1.23.0
 zipp==3.23.0
 docling==2.90.0
+pdfplumber==0.11.5

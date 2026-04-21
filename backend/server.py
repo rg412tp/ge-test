@@ -18,6 +18,7 @@ import asyncio
 import json as json_lib
 from google import genai
 from google.genai import types
+import pdfplumber
 
 # Optional: Docling for PDF extraction
 try:
@@ -1119,6 +1120,193 @@ def extract_with_docling(pdf_content: bytes) -> str:
         mathpix_poll_status(mathpix_pdf_id)
         return mathpix_get_mmd(mathpix_pdf_id)
 
+def extract_with_pdfplumber(pdf_content: bytes) -> list:
+    """Layout-aware PDF extraction using pdfplumber - groups text by spatial proximity."""
+    import io
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
+            all_text_blocks = []  # List of {page, y_top, y_bottom, x0, x1, text}
+
+            # Extract text blocks with coordinates from each page
+            for page_num, page in enumerate(pdf.pages, start=1):
+                words = page.extract_words(use_text_flow=True)
+                if not words:
+                    continue
+
+                # Group words into lines by Y coordinate (within ~12pt tolerance)
+                lines_on_page = []
+                current_line = []
+                current_y = None
+                y_tolerance = 3  # pixels
+
+                for word in words:
+                    word_y = word['top']
+                    if current_y is None:
+                        current_y = word_y
+                        current_line = [word]
+                    elif abs(word_y - current_y) <= y_tolerance:
+                        current_line.append(word)
+                    else:
+                        # Save current line and start new one
+                        if current_line:
+                            line_text = ' '.join(w['text'] for w in current_line)
+                            y_min = min(w['top'] for w in current_line)
+                            y_max = max(w['bottom'] for w in current_line)
+                            x_min = min(w['x0'] for w in current_line)
+                            x_max = max(w['x1'] for w in current_line)
+                            lines_on_page.append({
+                                'text': line_text,
+                                'y_top': y_min,
+                                'y_bottom': y_max,
+                                'x0': x_min,
+                                'x1': x_max,
+                                'page': page_num
+                            })
+                        current_y = word_y
+                        current_line = [word]
+
+                # Don't forget the last line
+                if current_line:
+                    line_text = ' '.join(w['text'] for w in current_line)
+                    y_min = min(w['top'] for w in current_line)
+                    y_max = max(w['bottom'] for w in current_line)
+                    x_min = min(w['x0'] for w in current_line)
+                    x_max = max(w['x1'] for w in current_line)
+                    lines_on_page.append({
+                        'text': line_text,
+                        'y_top': y_min,
+                        'y_bottom': y_max,
+                        'x0': x_min,
+                        'x1': x_max,
+                        'page': page_num
+                    })
+
+                all_text_blocks.extend(lines_on_page)
+
+            # Now parse text blocks into questions
+            questions = []
+            i = 0
+            while i < len(all_text_blocks):
+                line = all_text_blocks[i]
+                stripped = line['text'].strip()
+
+                # Look for question number (1-99 at start of line)
+                q_match = re.match(r'^(\d{1,2})[\s.)\-:]+(.*)$', stripped)
+                if q_match:
+                    q_num = int(q_match.group(1))
+                    rest_text = q_match.group(2).strip()
+
+                    # Gather all text for this question until next question number
+                    question_lines = []
+                    if rest_text:
+                        question_lines.append({'text': rest_text, 'page': line['page']})
+
+                    j = i + 1
+                    while j < len(all_text_blocks):
+                        next_line = all_text_blocks[j]
+                        next_stripped = next_line['text'].strip()
+
+                        # Check if this is the start of a new question
+                        if re.match(r'^(\d{1,2})[\s.)\-:]+', next_stripped):
+                            break
+
+                        # Skip empty lines and artifacts
+                        if not next_stripped or re.search(
+                            r'DO NOT WRITE|Turn over|Total marks|Question Log',
+                            next_stripped, re.IGNORECASE
+                        ):
+                            j += 1
+                            continue
+
+                        question_lines.append({'text': next_stripped, 'page': next_line['page']})
+                        j += 1
+
+                    # Parse question and parts from collected lines
+                    question_obj = {
+                        "question_number": q_num,
+                        "text": "",
+                        "latex": "",
+                        "parts": [],
+                        "has_diagram": False,
+                        "has_table": False,
+                        "marks": None,
+                        "image_urls": []
+                    }
+
+                    current_part = None
+                    part_lines = []
+                    main_lines = []
+
+                    for line_item in question_lines:
+                        text = line_item['text'].strip()
+                        if not text:
+                            continue
+
+                        # Check for part marker (a), (b), (c), etc.
+                        part_match = re.match(r'^\(([a-z])\)\s*(.*)', text)
+                        if part_match:
+                            # Save previous part
+                            if current_part:
+                                part_text = ' '.join(part_lines).strip()
+                                if part_text:
+                                    marks = extract_marks(part_text)
+                                    question_obj["parts"].append({
+                                        "part_label": current_part,
+                                        "text": clean_text(part_text),
+                                        "latex": part_text,
+                                        "marks": marks,
+                                        "image_urls": []
+                                    })
+
+                            # Start new part
+                            current_part = part_match.group(1)
+                            rest = part_match.group(2)
+                            part_lines = [rest] if rest else []
+                        else:
+                            # Add to appropriate section
+                            if current_part:
+                                part_lines.append(text)
+                            else:
+                                main_lines.append(text)
+
+                    # Save last part
+                    if current_part:
+                        part_text = ' '.join(part_lines).strip()
+                        if part_text:
+                            marks = extract_marks(part_text)
+                            question_obj["parts"].append({
+                                "part_label": current_part,
+                                "text": clean_text(part_text),
+                                "latex": part_text,
+                                "marks": marks,
+                                "image_urls": []
+                            })
+
+                    # Process main content
+                    main_text = ' '.join(main_lines).strip()
+                    if main_text:
+                        marks = extract_marks(main_text)
+                        question_obj["text"] = clean_text(main_text)
+                        question_obj["latex"] = main_text
+                        if marks:
+                            question_obj["marks"] = marks
+
+                    # Check for tables
+                    all_question_text = main_text + ' '.join(part_lines)
+                    if all_question_text.count('|') > 3:
+                        question_obj["has_table"] = True
+
+                    questions.append(question_obj)
+                    i = j
+                else:
+                    i += 1
+
+            return questions
+
+    except Exception as e:
+        logger.error(f"PDFPlumber extraction error: {e}")
+        return []
+
 async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str):
     """Mathpix gets raw content once. Gemini structures it with retries. Caches Mathpix output to avoid re-extracting on Gemini retry."""
     try:
@@ -1140,24 +1328,19 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
             {"id": job_id}, {"$set": {"total_pages": total_pages, "processed_pages": 1}}
         )
 
-        # CALL 1: Docling - raw extraction (better than Mathpix for exam papers)
-        logger.info(f"Docling: extracting {total_pages} pages")
-        mmd_content = extract_with_docling(pdf_content)
-        if not mmd_content:
-            raise Exception("Docling extraction failed")
-        logger.info(f"Docling done: {len(mmd_content)} chars")
+        # Use PDFPlumber for layout-aware extraction (preferred approach)
+        logger.info(f"PDFPlumber: extracting {total_pages} pages with layout awareness")
+        structured_questions = extract_with_pdfplumber(pdf_content)
 
-        # Cache extraction output in extraction job
-        await db.extraction_jobs.update_one(
-            {"id": job_id},
-            {"$set": {"mathpix_output": mmd_content, "processed_pages": total_pages // 2}}
-        )
+        if not structured_questions:
+            # Fallback to Docling if pdfplumber returns no questions
+            logger.warning("PDFPlumber found no questions, falling back to Docling")
+            mmd_content = extract_with_docling(pdf_content)
+            if not mmd_content:
+                raise Exception("All extraction methods failed")
+            structured_questions = parse_mathpix_mmd(mmd_content)
 
-        # Parse markdown into questions (no Gemini - questions available immediately)
-        logger.info("Parsing questions from Docling output")
-        logger.info(f"Docling markdown (first 2000 chars):\n{mmd_content[:2000]}")
-        structured_questions = parse_mathpix_mmd(mmd_content)
-        logger.info(f"Parsing done: {len(structured_questions)} questions")
+        logger.info(f"Extraction done: {len(structured_questions)} questions")
 
         await db.extraction_jobs.update_one(
             {"id": job_id}, {"$set": {"processed_pages": total_pages - 1}}
