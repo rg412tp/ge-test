@@ -1353,7 +1353,7 @@ const Dashboard = () => {
           ) : (
             <>
               {/* Selected paper header */}
-              <div className="p-3 border-b border-black flex items-center justify-between bg-slate-50">
+              <div className="p-3 border-b border-black flex flex-wrap items-center gap-2 bg-slate-50">
                 <div className="flex items-center gap-2">
                   <span className="font-sans font-bold">{selectedPaper.board}</span>
                   <span className="text-sm text-slate-500">{selectedPaper.exam_year} P{selectedPaper.paper_number} {selectedPaper.tier}</span>
@@ -1362,7 +1362,7 @@ const Dashboard = () => {
                   )}
                   <StatusTag status={selectedPaper.status} />
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   {selectedPaper.status === "extracted" && (
                     <button
                       data-testid="re-extract-btn"
