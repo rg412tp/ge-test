@@ -18,6 +18,8 @@ import asyncio
 import json as json_lib
 from google import genai
 from google.genai import types
+from docling.document_converter import DocumentConverter
+from docling.models.document import ConversionStatus
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1123,6 +1125,35 @@ async def re_extract_paper(paper_id: str):
 
     return {"message": "Re-extraction started", "job_id": job.id, "paper_id": paper_id}
 
+def extract_with_docling(pdf_content: bytes) -> str:
+    """Extract text and images from PDF using Docling instead of Mathpix."""
+    try:
+        # Save PDF to temp file since Docling needs a file path
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+            tmp.write(pdf_content)
+            tmp_path = tmp.name
+
+        try:
+            # Convert PDF using Docling
+            converter = DocumentConverter()
+            result = converter.convert(tmp_path)
+
+            if result.status != ConversionStatus.SUCCESS:
+                logger.error(f"Docling conversion failed: {result.status}")
+                return None
+
+            # Export as markdown with proper structure
+            markdown_content = result.document.export_to_markdown()
+            return markdown_content
+        finally:
+            # Clean up temp file
+            import os
+            os.unlink(tmp_path)
+    except Exception as e:
+        logger.error(f"Docling extraction error: {e}")
+        return None
+
 async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str):
     """Mathpix gets raw content once. Gemini structures it with retries. Caches Mathpix output to avoid re-extracting on Gemini retry."""
     try:
@@ -1144,26 +1175,24 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
             {"id": job_id}, {"$set": {"total_pages": total_pages, "processed_pages": 1}}
         )
 
-        # CALL 1: Mathpix - raw extraction (ONLY ONCE per extraction attempt)
-        logger.info(f"Mathpix: submitting {total_pages} pages")
-        await log_api_call(paper_id, "mathpix_pdf")
-        mathpix_pdf_id = mathpix_submit_pdf(pdf_content)
-        mathpix_poll_status(mathpix_pdf_id)
-        mmd_content = mathpix_get_mmd(mathpix_pdf_id)
-        logger.info(f"Mathpix done: {len(mmd_content)} chars")
+        # CALL 1: Docling - raw extraction (better than Mathpix for exam papers)
+        logger.info(f"Docling: extracting {total_pages} pages")
+        mmd_content = extract_with_docling(pdf_content)
+        if not mmd_content:
+            raise Exception("Docling extraction failed")
+        logger.info(f"Docling done: {len(mmd_content)} chars")
 
-        # Cache Mathpix output in extraction job for potential re-use on Gemini retry
+        # Cache extraction output in extraction job
         await db.extraction_jobs.update_one(
             {"id": job_id},
             {"$set": {"mathpix_output": mmd_content, "processed_pages": total_pages // 2}}
         )
 
-        # SKIP Gemini - parse with regex only (immediate extraction without classification)
-        logger.info("Parsing questions with regex (no Gemini - questions available immediately)")
-        # Debug: log first 3000 chars of markdown to diagnose parsing
-        logger.info(f"Mathpix markdown (first 3000 chars):\n{mmd_content[:3000]}")
+        # Parse markdown into questions (no Gemini - questions available immediately)
+        logger.info("Parsing questions from Docling output")
+        logger.info(f"Docling markdown (first 2000 chars):\n{mmd_content[:2000]}")
         structured_questions = parse_mathpix_mmd(mmd_content)
-        logger.info(f"Parsing done: {len(structured_questions)} questions (classification optional later)")
+        logger.info(f"Parsing done: {len(structured_questions)} questions")
 
         await db.extraction_jobs.update_one(
             {"id": job_id}, {"$set": {"processed_pages": total_pages - 1}}
