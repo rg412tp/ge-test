@@ -458,128 +458,145 @@ def download_image(url: str) -> bytes:
     return resp.content
 
 def parse_mathpix_mmd(mmd_content: str) -> list:
-    """Parse Mathpix Markdown into structured questions with images"""
+    """Parse Mathpix Markdown into structured questions using block-based approach"""
     questions = []
-    lines = mmd_content.split('\n')
-    
-    current_q = None
-    current_part = None
-    current_text = []
-    current_images = []
-    
-    # Question: "1 ", "**1**", "1.", "1)", "1:", "1-" at line start
-    # Negative lookahead (?!%) prevents matching percentages like "72 %"
-    q_pattern = re.compile(r'^(?:\*\*)?(\d{1,2})(?:\*\*)?(?:\s+(?!%)|[.)\-:])')
-    # Part: "(a)", "**(a)**"
-    part_pattern = re.compile(r'^(?:\*\*)?\(([a-z])\)(?:\*\*)?\s*')
-    # Image: ![...](url)
-    img_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
-    # Marks: [2 marks], (2 marks), [2], (Total for Question ... marks)
-    marks_pattern = re.compile(r'\((\d+)\s*marks?\)', re.IGNORECASE)
-    
-    def save_current():
-        nonlocal current_q, current_part, current_text, current_images
-        text = '\n'.join(current_text).strip()
-        if not text and not current_images:
-            current_text = []
-            current_images = []
-            return
-            
-        if current_q is not None and current_q > 0:
-            # Find or create question
-            existing = next((q for q in questions if q["question_number"] == current_q), None)
-            if not existing:
-                existing = {
-                    "question_number": current_q, "text": "", "latex": "",
-                    "parts": [], "has_diagram": False, "has_table": False,
-                    "marks": None, "image_urls": []
-                }
-                questions.append(existing)
-            
-            # Extract marks
-            m = marks_pattern.search(text)
-            marks = int(m.group(1)) if m else None
-            
-            if current_part:
-                existing["parts"].append({
-                    "part_label": current_part,
-                    "text": clean_text(text),
-                    "latex": text,
-                    "marks": marks,
-                    "image_urls": current_images.copy()
-                })
+
+    # First pass: Split into question blocks
+    # A question block starts with a question number at the beginning of a line
+    question_block_pattern = re.compile(r'^(?:\*\*)?(\d{1,2})(?:\*\*)?(?:\s|[.)\-:])', re.MULTILINE)
+
+    # Find all question starts
+    matches = list(question_block_pattern.finditer(mmd_content))
+
+    if not matches:
+        return questions
+
+    # Split content into blocks, each starting with a question number
+    blocks = []
+    for i, match in enumerate(matches):
+        q_num = int(match.group(1))
+        start_pos = match.start()
+        end_pos = matches[i+1].start() if i+1 < len(matches) else len(mmd_content)
+        block_content = mmd_content[start_pos:end_pos]
+        blocks.append((q_num, block_content))
+
+    # Process each question block
+    for q_num, block_content in blocks:
+        # Extract images from block
+        img_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+        image_urls = [m.group(2) for m in img_pattern.finditer(block_content)]
+
+        # Remove images from content for text extraction
+        block_text = img_pattern.sub('', block_content)
+
+        # Split into lines
+        lines = block_text.split('\n')
+
+        question_obj = {
+            "question_number": q_num,
+            "text": "",
+            "latex": "",
+            "parts": [],
+            "has_diagram": bool(image_urls),
+            "has_table": False,
+            "marks": None,
+            "image_urls": image_urls
+        }
+
+        current_part = None
+        part_content = []
+        main_content = []
+
+        # Skip artifacts
+        artifact_patterns = [
+            r'DO NOT WRITE IN THIS AREA',
+            r'Turn over',
+            r'Total marks',
+            r'Question Log Number',
+        ]
+        artifact_regex = re.compile('|'.join(artifact_patterns), re.IGNORECASE)
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Skip empty lines and artifacts
+            if not stripped or artifact_regex.search(stripped):
+                continue
+
+            # Skip the question number line itself (first line)
+            if i == 0:
+                # Extract text after question number
+                q_pattern = re.compile(r'^(?:\*\*)?(\d{1,2})(?:\*\*)?(?:\s|[.)\-:])(.*)$')
+                m = q_pattern.match(stripped)
+                if m:
+                    rest = m.group(2).strip()
+                    if rest:
+                        main_content.append(rest)
+                continue
+
+            # Check for parts (a), (b), (c), etc.
+            part_pattern = re.compile(r'^(?:\*\*)?\(([a-z])\)(?:\*\*)?(?:\s+(.*))?$')
+            part_match = part_pattern.match(stripped)
+
+            if part_match:
+                # Save previous part if exists
+                if current_part is not None:
+                    part_text = '\n'.join(part_content).strip()
+                    if part_text:
+                        marks = extract_marks(part_text)
+                        question_obj["parts"].append({
+                            "part_label": current_part,
+                            "text": clean_text(part_text),
+                            "latex": part_text,
+                            "marks": marks,
+                            "image_urls": []
+                        })
+                # Start new part
+                current_part = part_match.group(1)
+                rest_text = part_match.group(2) or ""
+                part_content = [rest_text] if rest_text else []
             else:
-                existing["text"] = clean_text(text)
-                existing["latex"] = text
-                if marks:
-                    existing["marks"] = marks
-            
-            if current_images:
-                existing["has_diagram"] = True
-                existing["image_urls"].extend(current_images)
-            
-            if '|' in text and text.count('|') > 3:
-                existing["has_table"] = True
-        
-        current_text = []
-        current_images = []
-    
-    # OCR artifact patterns to skip (common exam paper headers/footers)
-    artifact_patterns = [
-        r'DO NOT WRITE IN THIS AREA',
-        r'Turn over',
-        r'Total marks',
-        r'Question Log Number',
-        r'^\s*\*+\s*$',  # Lines with just asterisks
-        r'^\s*-+\s*$',   # Lines with just dashes
-    ]
-    artifact_regex = re.compile('|'.join(artifact_patterns), re.IGNORECASE)
+                # Add to appropriate content
+                if current_part is not None:
+                    part_content.append(line)
+                else:
+                    main_content.append(line)
 
-    for line in lines:
-        stripped = line.strip()
+        # Save last part
+        if current_part is not None:
+            part_text = '\n'.join(part_content).strip()
+            if part_text:
+                marks = extract_marks(part_text)
+                question_obj["parts"].append({
+                    "part_label": current_part,
+                    "text": clean_text(part_text),
+                    "latex": part_text,
+                    "marks": marks,
+                    "image_urls": []
+                })
 
-        # Skip OCR artifacts
-        if artifact_regex.search(stripped):
-            continue
+        # Process main content
+        main_text = '\n'.join(main_content).strip()
+        if main_text:
+            marks = extract_marks(main_text)
+            question_obj["text"] = clean_text(main_text)
+            question_obj["latex"] = main_text
+            if marks:
+                question_obj["marks"] = marks
 
-        # Check for images first (and extract URLs without adding the markdown to text)
-        img_match = img_pattern.search(line)
-        if img_match:
-            current_images.append(img_match.group(2))
-            # Remove the image markdown from the line, keep any text before/after
-            line_without_img = img_pattern.sub('', line).strip()
-            if line_without_img and current_q is not None:
-                current_text.append(line_without_img)
-            continue
+        # Check for tables
+        if '|' in main_text and main_text.count('|') > 3:
+            question_obj["has_table"] = True
 
-        # Check for question number
-        # Clean LaTeX math delimiters to expose question numbers
-        # Remove \( \) \[ \] around question numbers: \(1\), \[1\], etc.
-        stripped_for_q = re.sub(r'\\[\[\(]|\\[\]\)]', '', stripped)  # Remove \( \) \[ \]
-        q_match = q_pattern.match(stripped_for_q)
-        if q_match and not stripped.startswith('('):
-            save_current()
-            current_q = int(q_match.group(1))
-            current_part = None
-            rest = stripped_for_q[q_match.end():].strip()
-            current_text = [rest] if rest else []
-            continue
+        questions.append(question_obj)
 
-        # Check for part
-        part_match = part_pattern.match(stripped)
-        if part_match and current_q:
-            save_current()
-            current_part = part_match.group(1)
-            rest = stripped[part_match.end():].strip()
-            current_text = [rest] if rest else []
-            continue
-
-        # Regular line - add if we're in a question
-        if current_q is not None and stripped:
-            current_text.append(line)
-    
-    save_current()
     return questions
+
+def extract_marks(text: str) -> int:
+    """Extract marks from text"""
+    marks_pattern = re.compile(r'\((\d+)\s*marks?\)', re.IGNORECASE)
+    m = marks_pattern.search(text)
+    return int(m.group(1)) if m else None
 
 def clean_text(text: str) -> str:
     """Clean LaTeX for readable display - removes image URLs, font commands, tables, etc."""
