@@ -612,100 +612,48 @@ def extract_marks(text: str) -> int:
     return int(m.group(1)) if m else None
 
 def clean_text(text: str) -> str:
-    """Clean LaTeX for readable display - removes image URLs, font commands, tables, etc."""
+    """Clean LaTeX for readable display - aggressively removes ALL LaTeX markup."""
     t = text
 
-    # Remove image URLs (both markdown and plain CDN URLs)
-    t = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', '', t)  # Remove markdown images
-    t = re.sub(r'https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)', '', t)  # Remove image URLs
+    # Remove image URLs
+    t = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', '', t)
+    t = re.sub(r'https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)', '', t)
 
-    # Remove LaTeX tables entirely - match \begin{tabular}...\end{tabular} blocks
-    # Handle cases with nested braces: {|c|c|} or {lcr} etc.
-    t = re.sub(r'\\begin\{(?:tabular|array)\}[^}]*(?:\{[^}]*\})?[^}]*?\\end\{(?:tabular|array)\}', '', t, flags=re.DOTALL)
-    # Also handle cases where begin/end might be less structured
-    t = re.sub(r'\\begin\{(?:tabular|array)\}.*?\\end\{(?:tabular|array)\}', '', t, flags=re.DOTALL)
-    # Remove table formatting markers
-    t = re.sub(r'\\hline', '', t)  # Remove horizontal lines
-    t = re.sub(r'\|', '', t)  # Remove pipe separators
-    t = re.sub(r'&', ' ', t)  # Convert column separators to spaces
-    t = re.sub(r'\\\\', ' ', t)  # Remove LaTeX line breaks
-    t = re.sub(r'\\cline\{[^}]*\}', '', t)  # Remove cline commands
+    # AGGRESSIVE: Remove ALL LaTeX environment blocks first
+    t = re.sub(r'\\begin\{[^}]*\}.*?\\end\{[^}]*\}', '', t, flags=re.DOTALL)
+    t = re.sub(r'\\begin\{[^}]*\}', '', t)  # Any remaining begin tags
+    t = re.sub(r'\\end\{[^}]*\}', '', t)   # Any remaining end tags
 
-    # Remove strikethrough formatting (~~text~~)
-    t = re.sub(r'~~([^~]*)~~', r'\1', t)
+    # Remove LaTeX delimiters and their content
+    t = re.sub(r'\\\[.*?\\\]', '', t, flags=re.DOTALL)  # Remove $$ $$ blocks
+    t = re.sub(r'\$\$.*?\$\$', '', t, flags=re.DOTALL)   # Remove $$ $$ blocks
+    t = re.sub(r'(?<!\$)\$(?!\$)[^\$]*\$(?!\$)', '', t)  # Remove $ $ blocks
 
-    # Remove extra backslashes (multiple consecutive backslashes)
-    t = re.sub(r'\\{2,}', ' ', t)  # Double/triple backslashes to single space
+    # Remove ALL backslash commands - this is the key fix
+    # First, extract content from braced commands: \cmd{content} -> content
+    t = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', t)
+    # Then remove remaining backslash commands without braces
+    t = re.sub(r'\\[a-zA-Z]+\*?\s*', '', t)
+    # Remove any other backslash sequences
+    t = re.sub(r'\\[^a-zA-Z\s]', '', t)
 
-    # Remove LaTeX math delimiters
-    t = re.sub(r'\\\(|\\\)', '', t)
-    t = re.sub(r'\\\[|\\\]', '', t)
+    # Remove table markers and formatting
+    t = re.sub(r'\\hline', '', t)
+    t = re.sub(r'\\cline\{[^}]*\}', '', t)
+    t = re.sub(r'&', ' ', t)  # Table column separator
+    t = re.sub(r'\|+', ' ', t)  # Table cell borders
 
-    # Handle special LaTeX commands with arguments
-    t = re.sub(r'\\oldsymbol\{([^}]*)\}', r'\1', t)  # \oldsymbol{t} -> t
-    t = re.sub(r'\\text\{([^}]*)\}', r'\1', t)
-    t = re.sub(r'\\mathrm\{([^}]*)\}', r'\1', t)  # \mathrm{m} -> m
-    t = re.sub(r'\\mathbf\{([^}]*)\}', r'\1', t)  # \mathbf{text} -> text
-    t = re.sub(r'\\mathit\{([^}]*)\}', r'\1', t)  # \mathit{text} -> text
-    t = re.sub(r'\\rm\s+([^\s\\}]+)', r'\1', t)  # \rm text -> text
-    t = re.sub(r'\\bf\s+([^\s\\}]+)', r'\1', t)  # Bold: \bf text -> text
-    t = re.sub(r'\\it\s+([^\s\\}]+)', r'\1', t)  # Italic: \it text -> text
+    # Remove line breaks and excess backslashes
+    t = re.sub(r'\\{2,}', ' ', t)  # Multiple backslashes
+    t = re.sub(r'~~([^~]*)~~', r'\1', t)  # Strikethrough
 
-    # Handle fractions and roots (including inline variations)
-    t = re.sub(r'\\frac\s*\{\s*([^}]*)\s*\}\s*\{\s*([^}]*)\s*\}', r'\1/\2', t)
-    t = re.sub(r'\\sqrt\s*\{\s*([^}]*)\s*\}', r'√(\1)', t)
+    # Remove any remaining braces
+    t = re.sub(r'[{}]', '', t)
 
-    # Spacing and structural commands
-    t = re.sub(r'\\(quad|qquad|,|;|!)\s*', ' ', t)
-    t = re.sub(r'\\ldots', '...', t)  # Ellipsis
-    t = re.sub(r'\\\\\s*', ' ', t)  # Line breaks in tables
-
-    # Math relations and comparison operators
-    t = re.sub(r'\\leq|\\leqslant', '≤', t)
-    t = re.sub(r'\\geq|\\geqslant', '≥', t)
-    t = re.sub(r'\\neq', '≠', t)
-    t = re.sub(r'\\approx', '≈', t)
-    t = re.sub(r'\\propto', '∝', t)
-
-    # Math symbols and operators
-    t = re.sub(r'\\times', '×', t)
-    t = re.sub(r'\\div', '÷', t)
-    t = re.sub(r'\\pm', '±', t)
-    t = re.sub(r'\\mp', '∓', t)
-    t = re.sub(r'\\pi', 'π', t)
-    t = re.sub(r'\\alpha', 'α', t)
-    t = re.sub(r'\\beta', 'β', t)
-    t = re.sub(r'\\gamma', 'γ', t)
-    t = re.sub(r'\\theta', 'θ', t)
-    t = re.sub(r'\\lambda', 'λ', t)
-    t = re.sub(r'\\mu', 'μ', t)
-    t = re.sub(r'\\sigma', 'σ', t)
-    t = re.sub(r'\\infty', '∞', t)
-    t = re.sub(r'\\leftarrow', '←', t)
-    t = re.sub(r'\\rightarrow', '→', t)
-    t = re.sub(r'\\Rightarrow', '⇒', t)
-
-    # Superscripts and subscripts - preserve the content
-    t = re.sub(r'\^\s*\{\s*([^}]*)\s*\}', r'^\1', t)
-    t = re.sub(r'_\s*\{\s*([^}]*)\s*\}', r'_\1', t)
-
-    # Remove any remaining LaTeX commands (but keep the content if wrapped in braces)
-    # This handles \cmd{text} -> text pattern
-    t = re.sub(r'\\([a-zA-Z]+)\s*\{\s*([^}]*)\s*\}', r'\2', t)
-
-    # Remove remaining bare LaTeX commands
-    t = re.sub(r'\\[a-zA-Z]+\s*', '', t)
-
-    # Remove any remaining LaTeX commands that weren't caught
-    t = re.sub(r'\\[a-z]+(\{[^}]*\})?', '', t, flags=re.IGNORECASE)  # \command or \command{arg}
-
-    # Remove any remaining braces and brackets that aren't part of content
-    t = re.sub(r'[\{\}]', '', t)
-
-    # Clean up whitespace
-    t = re.sub(r'\n{3,}', '\n\n', t)  # Max 2 consecutive newlines
-    t = re.sub(r'[ \t]{2,}', ' ', t)  # Single space between words
-    t = re.sub(r'\s*\|\s*', ' ', t)  # Remove remaining pipe separators
+    # Clean up extra whitespace
+    t = re.sub(r'\n{3,}', '\n\n', t)
+    t = re.sub(r'[ \t]{2,}', ' ', t)
+    t = re.sub(r'\s+', ' ', t)  # Collapse all extra whitespace
 
     return t.strip()
 
