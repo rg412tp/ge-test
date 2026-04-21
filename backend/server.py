@@ -18,8 +18,15 @@ import asyncio
 import json as json_lib
 from google import genai
 from google.genai import types
-from docling.document_converter import DocumentConverter
-from docling.models.document import ConversionStatus
+
+# Optional: Docling for PDF extraction
+try:
+    from docling.document_converter import DocumentConverter
+    from docling.models.document import ConversionStatus
+    DOCLING_AVAILABLE = True
+except ImportError:
+    DOCLING_AVAILABLE = False
+    logger_temp = None  # Will be set after logger is initialized
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1126,7 +1133,14 @@ async def re_extract_paper(paper_id: str):
     return {"message": "Re-extraction started", "job_id": job.id, "paper_id": paper_id}
 
 def extract_with_docling(pdf_content: bytes) -> str:
-    """Extract text and images from PDF using Docling instead of Mathpix."""
+    """Extract text and images from PDF using Docling. Falls back to Mathpix if unavailable."""
+    if not DOCLING_AVAILABLE:
+        logger.warning("Docling not available, falling back to Mathpix")
+        # Fall back to Mathpix extraction
+        mathpix_pdf_id = mathpix_submit_pdf(pdf_content)
+        mathpix_poll_status(mathpix_pdf_id)
+        return mathpix_get_mmd(mathpix_pdf_id)
+
     try:
         # Save PDF to temp file since Docling needs a file path
         import tempfile
@@ -1151,8 +1165,11 @@ def extract_with_docling(pdf_content: bytes) -> str:
             import os
             os.unlink(tmp_path)
     except Exception as e:
-        logger.error(f"Docling extraction error: {e}")
-        return None
+        logger.error(f"Docling extraction error: {e}, falling back to Mathpix")
+        # Fall back to Mathpix if Docling fails
+        mathpix_pdf_id = mathpix_submit_pdf(pdf_content)
+        mathpix_poll_status(mathpix_pdf_id)
+        return mathpix_get_mmd(mathpix_pdf_id)
 
 async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str):
     """Mathpix gets raw content once. Gemini structures it with retries. Caches Mathpix output to avoid re-extracting on Gemini retry."""
