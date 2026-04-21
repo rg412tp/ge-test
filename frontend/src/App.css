@@ -32,3 +32,34 @@
 .hidden {
     display: none;
 }
+
+/* Button styles */
+.btn-primary {
+    border: 2px solid #16a34a;
+    background-color: #dcfce7;
+    color: #166534;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background-color: #bbf7d0;
+}
+
+.btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-secondary {
+    border: 2px solid #dc2626;
+    background-color: #fee2e2;
+    color: #991b1b;
+}
+
+.btn-secondary:hover:not(:disabled) {
+    background-color: #fecaca;
+}
+
+.btn-secondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
