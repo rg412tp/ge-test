@@ -468,7 +468,8 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
     current_images = []
     
     # Question: "1 ", "**1**", "1.", "1)", "1:", "1-" at line start
-    q_pattern = re.compile(r'^(?:\*\*)?(\d{1,2})(?:\*\*)?(?:\s|[.)\-:])')
+    # Negative lookahead (?!%) prevents matching percentages like "72 %"
+    q_pattern = re.compile(r'^(?:\*\*)?(\d{1,2})(?:\*\*)?(?:\s+(?!%)|[.)\-:])')
     # Part: "(a)", "**(a)**"
     part_pattern = re.compile(r'^(?:\*\*)?\(([a-z])\)(?:\*\*)?\s*')
     # Image: ![...](url)
@@ -589,11 +590,12 @@ def clean_text(text: str) -> str:
     t = re.sub(r'https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)', '', t)  # Remove image URLs
 
     # Remove LaTeX tables entirely - match \begin{tabular}...\end{tabular} blocks
-    t = re.sub(r'\\begin\{tabular\}[^}]*\}.*?\\end\{tabular\}', '', t, flags=re.DOTALL)
-    # Also remove any remaining table-related commands
+    # Pattern handles: \begin{tabular}{options}...content...\end{tabular}
+    t = re.sub(r'\\begin\{(?:tabular|array)\}\{[^}]*\}.*?\\end\{(?:tabular|array)\}', '', t, flags=re.DOTALL)
+    # Remove remaining line breaks and table formatting
     t = re.sub(r'\\hline', '', t)  # Remove horizontal lines
-    t = re.sub(r'\\begin\{array\}[^}]*\}.*?\\end\{array\}', '', t, flags=re.DOTALL)  # Array tables
-    t = re.sub(r'&', '|', t)  # Convert column separators to pipes for readability
+    t = re.sub(r'&', '|', t)  # Convert column separators to pipes
+    t = re.sub(r'\\\\', ' ', t)  # Remove LaTeX line breaks
 
     # Remove strikethrough formatting (~~text~~)
     t = re.sub(r'~~([^~]*)~~', r'\1', t)

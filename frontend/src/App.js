@@ -1533,6 +1533,13 @@ const Dashboard = () => {
                     </div>
                   </div>
                   <div className="text-sm whitespace-pre-wrap mb-2">{renderLatex(q.text, q.latex)}</div>
+                  {q.image_urls && q.image_urls.length > 0 && (
+                    <div className="mt-3 mb-3">
+                      {q.image_urls.map((url, idx) => (
+                        <img key={idx} src={`${BACKEND_URL}/images/${url.split('/').pop()}`} alt={`Q${q.question_number} diagram ${idx + 1}`} className="max-w-full h-auto border border-slate-300 mb-2" />
+                      ))}
+                    </div>
+                  )}
                   {q.parts && q.parts.length > 0 && (
                     <div className="ml-4 mt-2 text-xs">
                       <strong>Parts:</strong> {q.parts.map((p, i) => `(${p.part_label}) ${p.marks ? p.marks + 'mk' : ''}`).join(', ')}
