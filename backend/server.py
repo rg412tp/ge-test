@@ -523,7 +523,24 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
         current_text = []
         current_images = []
     
+    # OCR artifact patterns to skip (common exam paper headers/footers)
+    artifact_patterns = [
+        r'DO NOT WRITE IN THIS AREA',
+        r'Turn over',
+        r'Total marks',
+        r'Question Log Number',
+        r'^\s*\*+\s*$',  # Lines with just asterisks
+        r'^\s*-+\s*$',   # Lines with just dashes
+    ]
+    artifact_regex = re.compile('|'.join(artifact_patterns), re.IGNORECASE)
+
     for line in lines:
+        stripped = line.strip()
+
+        # Skip OCR artifacts
+        if artifact_regex.search(stripped):
+            continue
+
         # Check for images first (and extract URLs without adding the markdown to text)
         img_match = img_pattern.search(line)
         if img_match:
@@ -535,9 +552,9 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
             continue
 
         # Check for question number
-        stripped = line.strip()
         # Clean LaTeX math delimiters to expose question numbers
-        stripped_for_q = re.sub(r'\\[\[(]', '', stripped)  # Remove \( or \[
+        # Remove \( \) \[ \] around question numbers: \(1\), \[1\], etc.
+        stripped_for_q = re.sub(r'\\[\[\(]|\\[\]\)]', '', stripped)  # Remove \( \) \[ \]
         q_match = q_pattern.match(stripped_for_q)
         if q_match and not stripped.startswith('('):
             save_current()
@@ -571,11 +588,11 @@ def clean_text(text: str) -> str:
     t = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', '', t)  # Remove markdown images
     t = re.sub(r'https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)', '', t)  # Remove image URLs
 
-    # Remove LaTeX tables entirely (convert to simple text representation)
-    # Handles \begin{tabular}...\end{tabular} blocks
-    t = re.sub(r'\\begin\{tabular\}[^\}]*\}', '', t)  # Remove tabular begin
-    t = re.sub(r'\\end\{tabular\}', '', t)  # Remove tabular end
+    # Remove LaTeX tables entirely - match \begin{tabular}...\end{tabular} blocks
+    t = re.sub(r'\\begin\{tabular\}[^}]*\}.*?\\end\{tabular\}', '', t, flags=re.DOTALL)
+    # Also remove any remaining table-related commands
     t = re.sub(r'\\hline', '', t)  # Remove horizontal lines
+    t = re.sub(r'\\begin\{array\}[^}]*\}.*?\\end\{array\}', '', t, flags=re.DOTALL)  # Array tables
     t = re.sub(r'&', '|', t)  # Convert column separators to pipes for readability
 
     # Remove strikethrough formatting (~~text~~)
