@@ -701,6 +701,8 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
     setEditMarks(question.marks?.toString() || "");
     setEditParts(question.parts?.map(p => ({ ...p })) || []);
     setEditSolution(question.solution || "");
+    setImages([]);  // Clear old images immediately when question changes
+    setMarkSchemeEntries([]);  // Clear old mark scheme
 
     let mounted = true;
 
