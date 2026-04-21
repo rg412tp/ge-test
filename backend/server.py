@@ -507,14 +507,18 @@ def parse_mathpix_mmd(mmd_content: str) -> list:
         part_content = []
         main_content = []
 
-        # Skip artifacts
+        # Skip artifacts and non-question content
         artifact_patterns = [
             r'DO NOT WRITE IN THIS AREA',
             r'Turn over',
             r'Total marks',
             r'Question Log Number',
+            r'^\s*\*+\s*$',  # Lines with just asterisks
+            r'^\s*-+\s*$',   # Lines with just dashes
+            r'^\s*\d+\s*$',  # Standalone page numbers
+            r'^\s*\|\s*\|',  # Table separators
         ]
-        artifact_regex = re.compile('|'.join(artifact_patterns), re.IGNORECASE)
+        artifact_regex = re.compile('|'.join(artifact_patterns), re.IGNORECASE | re.MULTILINE)
 
         for i, line in enumerate(lines):
             stripped = line.strip()
@@ -607,12 +611,16 @@ def clean_text(text: str) -> str:
     t = re.sub(r'https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)', '', t)  # Remove image URLs
 
     # Remove LaTeX tables entirely - match \begin{tabular}...\end{tabular} blocks
-    # Pattern handles: \begin{tabular}{options}...content...\end{tabular}
-    t = re.sub(r'\\begin\{(?:tabular|array)\}\{[^}]*\}.*?\\end\{(?:tabular|array)\}', '', t, flags=re.DOTALL)
-    # Remove remaining line breaks and table formatting
+    # Handle cases with nested braces: {|c|c|} or {lcr} etc.
+    t = re.sub(r'\\begin\{(?:tabular|array)\}[^}]*(?:\{[^}]*\})?[^}]*?\\end\{(?:tabular|array)\}', '', t, flags=re.DOTALL)
+    # Also handle cases where begin/end might be less structured
+    t = re.sub(r'\\begin\{(?:tabular|array)\}.*?\\end\{(?:tabular|array)\}', '', t, flags=re.DOTALL)
+    # Remove table formatting markers
     t = re.sub(r'\\hline', '', t)  # Remove horizontal lines
-    t = re.sub(r'&', '|', t)  # Convert column separators to pipes
+    t = re.sub(r'\|', '', t)  # Remove pipe separators
+    t = re.sub(r'&', ' ', t)  # Convert column separators to spaces
     t = re.sub(r'\\\\', ' ', t)  # Remove LaTeX line breaks
+    t = re.sub(r'\\cline\{[^}]*\}', '', t)  # Remove cline commands
 
     # Remove strikethrough formatting (~~text~~)
     t = re.sub(r'~~([^~]*)~~', r'\1', t)
@@ -679,13 +687,16 @@ def clean_text(text: str) -> str:
     # Remove remaining bare LaTeX commands
     t = re.sub(r'\\[a-zA-Z]+\s*', '', t)
 
+    # Remove any remaining LaTeX commands that weren't caught
+    t = re.sub(r'\\[a-z]+(\{[^}]*\})?', '', t, flags=re.IGNORECASE)  # \command or \command{arg}
+
     # Remove any remaining braces and brackets that aren't part of content
     t = re.sub(r'[\{\}]', '', t)
 
     # Clean up whitespace
     t = re.sub(r'\n{3,}', '\n\n', t)  # Max 2 consecutive newlines
     t = re.sub(r'[ \t]{2,}', ' ', t)  # Single space between words
-    t = re.sub(r'\s*\|\s*', ' | ', t)  # Clean up table column separators
+    t = re.sub(r'\s*\|\s*', ' ', t)  # Remove remaining pipe separators
 
     return t.strip()
 
