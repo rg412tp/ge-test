@@ -1497,14 +1497,32 @@ const Dashboard = () => {
           <div className="bg-white rounded border-2 border-black max-w-4xl max-h-[90vh] overflow-auto w-full">
             <div className="sticky top-0 bg-white border-b border-black p-4 flex items-center justify-between">
               <h2 className="text-xl font-bold">All Questions - {selectedPaper?.board} P{selectedPaper?.paper_number}</h2>
-              <button
-                onClick={() => setShowFullPreview(false)}
-                className="text-2xl font-bold hover:bg-slate-100 px-3 py-1"
-              >
-                ✕
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    const element = document.getElementById('pdf-content');
+                    const opt = {
+                      margin: 10,
+                      filename: `Edexcel_P${selectedPaper?.paper_number}_Questions.pdf`,
+                      image: { type: 'jpeg', quality: 0.98 },
+                      html2canvas: { scale: 2 },
+                      jsPDF: { orientation: 'portrait', unit: 'mm', format: 'a4' }
+                    };
+                    html2pdf().set(opt).from(element).save();
+                  }}
+                  className="text-xs px-3 py-2 border border-green-600 bg-green-50 text-green-700 hover:bg-green-100"
+                >
+                  📥 Export PDF
+                </button>
+                <button
+                  onClick={() => setShowFullPreview(false)}
+                  className="text-2xl font-bold hover:bg-slate-100 px-3 py-1"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
-            <div className="p-4">
+            <div id="pdf-content" className="p-4">
               {questions.map((q) => (
                 <div key={q.id} className="mb-6 pb-6 border-b border-slate-300 last:border-b-0">
                   <div className="flex items-start justify-between mb-2">
