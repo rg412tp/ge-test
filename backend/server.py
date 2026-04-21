@@ -29,6 +29,13 @@ except ImportError:
     DOCLING_AVAILABLE = False
     logger_temp = None  # Will be set after logger is initialized
 
+# Optional: LlamaParse for advanced PDF extraction with images
+try:
+    from llama_parse import LlamaParse
+    LLAMAPARSE_AVAILABLE = True
+except ImportError:
+    LLAMAPARSE_AVAILABLE = False
+
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 # Also load production env if exists
@@ -1307,6 +1314,55 @@ def extract_with_pdfplumber(pdf_content: bytes) -> list:
         logger.error(f"PDFPlumber extraction error: {e}")
         return []
 
+def extract_with_llamaparse(pdf_content: bytes) -> list:
+    """Extract text, images, and structure using LlamaParse (agentic OCR)."""
+    if not LLAMAPARSE_AVAILABLE:
+        logger.warning("LlamaParse not available")
+        return []
+
+    try:
+        api_key = os.environ.get("LLAMAPARSE_API_KEY")
+        if not api_key:
+            logger.warning("LLAMAPARSE_API_KEY not set, skipping LlamaParse extraction")
+            return []
+
+        # Initialize LlamaParse
+        parser = LlamaParse(api_key=api_key, result_type="markdown", verbose=False)
+
+        # Save PDF to temp file since LlamaParse needs a file path
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+            tmp.write(pdf_content)
+            tmp_path = tmp.name
+
+        try:
+            logger.info("LlamaParse: Starting intelligent PDF parsing")
+            # Parse the PDF with LlamaParse
+            documents = parser.load_data(tmp_path)
+
+            if not documents:
+                logger.warning("LlamaParse returned no documents")
+                return []
+
+            # Convert parsed documents to markdown for compatibility with existing parser
+            markdown_content = "\n\n".join([doc.text for doc in documents])
+            logger.info(f"LlamaParse done: {len(markdown_content)} chars from {len(documents)} documents")
+
+            # Use existing parse_mathpix_mmd to convert markdown to questions
+            # LlamaParse output is markdown-like, so it should work
+            questions = parse_mathpix_mmd(markdown_content)
+
+            return questions
+
+        finally:
+            # Clean up temp file
+            import os as os_module
+            os_module.unlink(tmp_path)
+
+    except Exception as e:
+        logger.error(f"LlamaParse extraction error: {e}")
+        return []
+
 async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str):
     """Mathpix gets raw content once. Gemini structures it with retries. Caches Mathpix output to avoid re-extracting on Gemini retry."""
     try:
@@ -1328,19 +1384,38 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
             {"id": job_id}, {"$set": {"total_pages": total_pages, "processed_pages": 1}}
         )
 
-        # Use PDFPlumber for layout-aware extraction (preferred approach)
-        logger.info(f"PDFPlumber: extracting {total_pages} pages with layout awareness")
-        structured_questions = extract_with_pdfplumber(pdf_content)
+        # EXTRACTION PIPELINE (with fallbacks):
+        # 1. Try LlamaParse (agentic OCR - best quality, handles images)
+        # 2. Fall back to PDFPlumber (spatial grouping)
+        # 3. Fall back to Docling (markdown extraction)
+
+        structured_questions = []
+
+        if LLAMAPARSE_AVAILABLE and os.environ.get("LLAMAPARSE_API_KEY"):
+            logger.info(f"LlamaParse: extracting {total_pages} pages with agentic OCR")
+            structured_questions = extract_with_llamaparse(pdf_content)
+            if structured_questions:
+                logger.info(f"LlamaParse success: {len(structured_questions)} questions")
 
         if not structured_questions:
-            # Fallback to Docling if pdfplumber returns no questions
+            logger.info(f"PDFPlumber: extracting {total_pages} pages with layout awareness")
+            structured_questions = extract_with_pdfplumber(pdf_content)
+            if structured_questions:
+                logger.info(f"PDFPlumber success: {len(structured_questions)} questions")
+
+        if not structured_questions:
             logger.warning("PDFPlumber found no questions, falling back to Docling")
             mmd_content = extract_with_docling(pdf_content)
             if not mmd_content:
                 raise Exception("All extraction methods failed")
             structured_questions = parse_mathpix_mmd(mmd_content)
+            if structured_questions:
+                logger.info(f"Docling success: {len(structured_questions)} questions")
 
-        logger.info(f"Extraction done: {len(structured_questions)} questions")
+        if not structured_questions:
+            raise Exception("All extraction methods failed - no questions found")
+
+        logger.info(f"Extraction complete: {len(structured_questions)} questions")
 
         await db.extraction_jobs.update_one(
             {"id": job_id}, {"$set": {"processed_pages": total_pages - 1}}
