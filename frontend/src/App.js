@@ -1215,6 +1215,7 @@ const Dashboard = () => {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [allTopics, setAllTopics] = useState({});
+  const [updating, setUpdating] = useState(false);
 
   // Get selected question object from questions array by ID
   const selectedQuestion = questions.find(q => q.id === selectedQuestionId) || null;
