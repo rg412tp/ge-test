@@ -1348,6 +1348,13 @@ def extract_with_llamaparse(pdf_content: bytes) -> list:
             markdown_content = "\n\n".join([doc.text for doc in documents])
             logger.info(f"LlamaParse done: {len(markdown_content)} chars from {len(documents)} documents")
 
+            # DEBUG: Save first 2000 chars of markdown to see format
+            import json
+            debug_sample = markdown_content[:2000]
+            with open("/tmp/llamaparse_sample.txt", "w") as f:
+                f.write(f"=== LLAMAPARSE MARKDOWN SAMPLE ===\n\n{debug_sample}\n\n=== FULL LENGTH ===\n{len(markdown_content)} chars")
+            logger.info(f"LlamaParse sample saved to /tmp/llamaparse_sample.txt")
+
             # Use existing parse_mathpix_mmd to convert markdown to questions
             # LlamaParse output is markdown-like, so it should work
             questions = parse_mathpix_mmd(markdown_content)
