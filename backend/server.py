@@ -29,9 +29,9 @@ except ImportError:
     DOCLING_AVAILABLE = False
     logger_temp = None  # Will be set after logger is initialized
 
-# Optional: LlamaParse for advanced PDF extraction with images
+# Optional: LlamaCloud for advanced PDF extraction with custom prompts
 try:
-    from llama_parse import LlamaParse
+    from llama_cloud.client import LlamaCloud
     LLAMAPARSE_AVAILABLE = True
 except ImportError:
     LLAMAPARSE_AVAILABLE = False
@@ -1315,60 +1315,188 @@ def extract_with_pdfplumber(pdf_content: bytes) -> list:
         return []
 
 def extract_with_llamaparse(pdf_content: bytes) -> list:
-    """Extract text, images, and structure using LlamaParse (agentic OCR)."""
+    """Extract GCSE exam questions using LlamaCloud with custom prompt and structured output."""
     if not LLAMAPARSE_AVAILABLE:
-        logger.warning("LlamaParse not available")
+        logger.warning("LlamaCloud not available")
         return []
 
     try:
         api_key = os.environ.get("LLAMAPARSE_API_KEY")
         if not api_key:
-            logger.warning("LLAMAPARSE_API_KEY not set, skipping LlamaParse extraction")
+            logger.warning("LLAMAPARSE_API_KEY not set, skipping LlamaCloud extraction")
             return []
 
-        # Initialize LlamaParse
-        parser = LlamaParse(api_key=api_key, result_type="markdown", verbose=False)
+        # Initialize LlamaCloud client
+        client = LlamaCloud(api_key=api_key)
 
-        # Save PDF to temp file since LlamaParse needs a file path
+        # Save PDF to temp file
         import tempfile
         with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
             tmp.write(pdf_content)
             tmp_path = tmp.name
 
         try:
-            logger.info("LlamaParse: Starting intelligent PDF parsing")
-            # Parse the PDF with LlamaParse
-            documents = parser.load_data(tmp_path)
+            logger.info("LlamaCloud: Starting intelligent PDF parsing with custom GCSE prompt")
 
-            if not documents:
-                logger.warning("LlamaParse returned no documents")
+            # Custom prompt for GCSE exam questions
+            custom_prompt = """
+You are extracting questions from a GCSE mathematics exam paper.
+
+For each question, extract:
+1. Question number (1-24)
+2. Main question text
+3. All sub-parts (a), (b), (c), etc. with their text
+4. Marks allocated (look for numbers before "marks)")
+5. Whether there are diagrams or tables
+
+Output as clear, well-formatted markdown with:
+- ## Question 1 (or appropriate number) as heading
+- Question text below
+- ### Part (a) for sub-parts
+- **(Marks: 3)** for mark allocations
+
+Do NOT include: "DO NOT WRITE IN THIS AREA", page numbers, "Turn over", or other boilerplate.
+"""
+
+            # Upload and parse with agentic tier for complex documents
+            file_handle = open(tmp_path, "rb")
+
+            result = client.parsing.parse(
+                file=file_handle,
+                tier="agentic",
+                version="latest",
+                custom_prompt=custom_prompt,
+                output_options={
+                    "markdown": {
+                        "preserve_formatting": True,
+                        "tables": {"output_tables_as_markdown": True}
+                    }
+                },
+                processing_options={
+                    "ocr_parameters": {"languages": ["en"]},
+                    "chart_parsing": False,  # Skip charts for speed
+                }
+            )
+
+            file_handle.close()
+
+            if not result or not result.markdown:
+                logger.warning("LlamaCloud returned no markdown")
                 return []
 
-            # Convert parsed documents to markdown for compatibility with existing parser
-            markdown_content = "\n\n".join([doc.text for doc in documents])
-            logger.info(f"LlamaParse done: {len(markdown_content)} chars from {len(documents)} documents")
+            markdown_content = result.markdown
+            logger.info(f"LlamaCloud done: {len(markdown_content)} chars")
 
-            # DEBUG: Save first 2000 chars of markdown to see format
-            import json
-            debug_sample = markdown_content[:2000]
-            with open("/tmp/llamaparse_sample.txt", "w") as f:
-                f.write(f"=== LLAMAPARSE MARKDOWN SAMPLE ===\n\n{debug_sample}\n\n=== FULL LENGTH ===\n{len(markdown_content)} chars")
-            logger.info(f"LlamaParse sample saved to /tmp/llamaparse_sample.txt")
+            # Parse the markdown specifically formatted for GCSE questions
+            questions = parse_gcse_questions_from_markdown(markdown_content)
 
-            # Use existing parse_mathpix_mmd to convert markdown to questions
-            # LlamaParse output is markdown-like, so it should work
-            questions = parse_mathpix_mmd(markdown_content)
+            if questions:
+                logger.info(f"LlamaCloud success: {len(questions)} questions extracted")
+            else:
+                logger.warning("LlamaCloud markdown parsing returned 0 questions")
 
             return questions
 
         finally:
-            # Clean up temp file
             import os as os_module
-            os_module.unlink(tmp_path)
+            if os_module.path.exists(tmp_path):
+                os_module.unlink(tmp_path)
 
     except Exception as e:
-        logger.error(f"LlamaParse extraction error: {e}")
+        logger.error(f"LlamaCloud extraction error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return []
+
+
+def parse_gcse_questions_from_markdown(markdown_content: str) -> list:
+    """Parse markdown formatted by LlamaCloud custom GCSE prompt into structured questions."""
+    questions = []
+
+    # Split by question headings (## Question 1, ## Question 2, etc.)
+    question_pattern = re.compile(r'^##\s+Question\s+(\d+)', re.MULTILINE)
+
+    matches = list(question_pattern.finditer(markdown_content))
+    if not matches:
+        logger.warning("No questions found with pattern '## Question N'")
+        return questions
+
+    # Split content into blocks
+    for i, match in enumerate(matches):
+        q_num = int(match.group(1))
+        start_pos = match.start()
+        end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(markdown_content)
+        block_content = markdown_content[start_pos:end_pos]
+
+        # Parse this question block
+        question_obj = {
+            "question_number": q_num,
+            "text": "",
+            "latex": "",
+            "parts": [],
+            "has_diagram": False,
+            "has_table": False,
+            "marks": None,
+            "image_urls": []
+        }
+
+        # Extract parts (a), (b), (c), etc.
+        part_pattern = re.compile(r'^###\s+Part\s+\(([a-z])\)', re.MULTILINE)
+        part_matches = list(part_pattern.finditer(block_content))
+
+        if part_matches:
+            # Extract main question text (before first part)
+            main_text_end = part_matches[0].start()
+            main_text = block_content[block_content.find('\n', match.end()):main_text_end].strip()
+            question_obj["text"] = clean_text(main_text)
+
+            # Extract each part
+            for j, part_match in enumerate(part_matches):
+                part_label = part_match.group(1)
+                part_start = part_match.end()
+                part_end = part_matches[j + 1].start() if j + 1 < len(part_matches) else len(block_content)
+                part_content = block_content[part_start:part_end].strip()
+
+                # Extract marks from pattern **(Marks: N)**
+                marks_pattern = re.search(r'\*\*\(Marks?:\s*(\d+)\)\*\*', part_content)
+                part_marks = int(marks_pattern.group(1)) if marks_pattern else None
+
+                # Remove marks from content
+                part_text = marks_pattern.sub('', part_content).strip() if marks_pattern else part_content.strip()
+
+                question_obj["parts"].append({
+                    "part_label": part_label,
+                    "text": clean_text(part_text),
+                    "latex": "",
+                    "marks": part_marks,
+                    "image_urls": []
+                })
+
+                # Accumulate marks
+                if part_marks and question_obj["marks"] is None:
+                    question_obj["marks"] = part_marks
+                elif part_marks:
+                    question_obj["marks"] += part_marks
+        else:
+            # No sub-parts, extract entire block as main text
+            main_text = block_content[block_content.find('\n', match.end()):].strip()
+            question_obj["text"] = clean_text(main_text)
+
+            # Extract marks from main text
+            marks_pattern = re.search(r'\(Marks?:\s*(\d+)\)', main_text)
+            if marks_pattern:
+                question_obj["marks"] = int(marks_pattern.group(1))
+
+        # Check for diagrams/tables mentions
+        if 'diagram' in block_content.lower() or 'figure' in block_content.lower():
+            question_obj["has_diagram"] = True
+        if 'table' in block_content.lower():
+            question_obj["has_table"] = True
+
+        if question_obj["text"] or question_obj["parts"]:
+            questions.append(question_obj)
+
+    return questions
 
 async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str):
     """Mathpix gets raw content once. Gemini structures it with retries. Caches Mathpix output to avoid re-extracting on Gemini retry."""
