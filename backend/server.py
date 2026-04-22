@@ -1327,7 +1327,7 @@ def extract_with_llamaparse(pdf_content: bytes) -> list:
             return []
 
         # Initialize LlamaCloud client
-        client = LlamaCloud(api_key=api_key)
+        client = LlamaCloud(api_key)
 
         # Save PDF to temp file
         import tempfile
