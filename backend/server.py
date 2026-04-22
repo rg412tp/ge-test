@@ -1326,8 +1326,8 @@ def extract_with_llamaparse(pdf_content: bytes) -> list:
             logger.warning("LLAMAPARSE_API_KEY not set, skipping LlamaCloud extraction")
             return []
 
-        # Initialize LlamaCloud client
-        client = LlamaCloud(api_key)
+        # Initialize LlamaCloud client (picks up LLAMAPARSE_API_KEY from environment)
+        client = LlamaCloud()
 
         # Save PDF to temp file
         import tempfile
