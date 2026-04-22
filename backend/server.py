@@ -1361,7 +1361,7 @@ Do NOT include: "DO NOT WRITE IN THIS AREA", page numbers, "Turn over", or other
             # Upload and parse with agentic tier for complex documents
             file_handle = open(tmp_path, "rb")
 
-            result = client.parsing.parse(
+            result = client.parsing.parse_file(
                 file=file_handle,
                 tier="agentic",
                 version="latest",
